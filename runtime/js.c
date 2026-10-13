@@ -1686,7 +1686,10 @@ JSValueRef tv_js_function(tv_fn fn, tv_js_tramp tramp) {
     c->fn = fn;
     c->tramp = tramp;
     tv_env_retain(fn.env);
-    return JSObjectMake(ctx, tv_js_closure_class, c);
+    JSObjectRef f = JSObjectMake(ctx, tv_js_closure_class, c);
+    /* Use a native function's prototype from this context, not the mutable global Function. */
+    JSObjectSetPrototype(ctx, f, JSObjectGetPrototype(ctx, tv_js_noop));
+    return f;
 }
 
 /* ------------------------------------------------------------------ roots

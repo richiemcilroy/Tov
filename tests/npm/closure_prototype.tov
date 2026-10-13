@@ -1,0 +1,7 @@
+import { exercise } from "closure-prototype"
+
+const offset = 10
+const result = try exercise((a: Js, b: Js) => (a as int) + (b as int) + offset)
+console.log(result.called as int, result.applied as int, result.boundResult as int)
+console.log(result.isFunction as bool, result.kind as string, result.hasFunctionPrototype as bool)
+console.log(result.boundIsFunction as bool, result.nativeSource as bool, result.inheritedSource as bool)
