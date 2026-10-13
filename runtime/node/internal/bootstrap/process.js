@@ -277,7 +277,9 @@ Object.defineProperty(process, '_tovEmitter', { __proto__: null, get: () => emit
 function stdioStream(fd) {
   if (native.isatty(fd)) {
     const { WriteStream } = require('tty');
-    return new WriteStream(fd);
+    const stream = new WriteStream(fd);
+    process.on('SIGWINCH', () => stream._refreshSize());
+    return stream;
   }
   const { Writable } = require('stream');
   const stream = new Writable({

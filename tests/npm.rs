@@ -47,7 +47,13 @@ fn main() {
         let cache = (name == "cache" && (cfg!(target_vendor = "apple") || std::env::var_os("TOV_JSC_DIR").is_some())).then(|| std::env::temp_dir().join(format!("tov-npm-cache-{}", std::process::id())));
         let runs = if cache.is_some() { 2 } else { 1 };
         for run in 0..runs {
-            let mut cmd = Command::new(&built.binary);
+            let mut cmd = if name == "node_stdio_sigwinch" {
+                let mut cmd = Command::new("python3");
+                cmd.arg(dir.join("stdio_sigwinch_pty.py")).arg(&built.binary);
+                cmd
+            } else {
+                Command::new(&built.binary)
+            };
             if let Some(dir) = &cache {
                 if run == 0 {
                     let _ = std::fs::remove_dir_all(dir);
