@@ -38,6 +38,8 @@ pub struct Built {
     pub binary: PathBuf,
     /// It links TLS (the program calls fetch()).
     pub tls: bool,
+    /// It links Tov's own JavaScriptCore rather than the system engine.
+    pub jsc_own: bool,
     pub cached: bool,
     /// The program's source files on disk (the entry and everything it imports).
     pub sources: Vec<PathBuf>,
@@ -336,6 +338,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let tls = uses_tls.then(|| TlsArchive::new(&cc, sysroot.as_deref(), &extra));
     // A program importing npm packages links the JavaScript bridge (compiled once per compiler).
     let jsc = if npm.is_empty() { None } else { Some(jsc_flags()?) };
+    let jsc_own = jsc.as_ref().is_some_and(|j| j.own);
     let js_key = match &jsc {
         None => String::new(),
         Some(j) => hash_hex(&[JS_C.as_bytes(), NODE_C.as_bytes(), NAPI_C.as_bytes(), codegen::JS_H.as_bytes(), codegen::RUNTIME_H.as_bytes(), cc.as_bytes(), flag_text.as_bytes(), JIT_ENTITLEMENTS.as_bytes(), j.cflags.join(" ").as_bytes(), j.libs.join(" ").as_bytes()]),
@@ -352,7 +355,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
             Some(blob) => with_blob(&binary, blob)?,
             None => binary,
         };
-        return Ok(Built { binary, tls: uses_tls, cached: true, sources, timings: (t1 - t0, t2 - t1, Duration::ZERO) });
+        return Ok(Built { binary, tls: uses_tls, jsc_own, cached: true, sources, timings: (t1 - t0, t2 - t1, Duration::ZERO) });
     }
     let c_dir = dir.join("c");
     for d in [&bin_dir, &c_dir] {
@@ -495,7 +498,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         None => binary,
     };
     let t3 = Instant::now();
-    Ok(Built { binary, tls: uses_tls, cached: false, sources, timings: (t1 - t0, t2 - t1, t3 - t2) })
+    Ok(Built { binary, tls: uses_tls, jsc_own, cached: false, sources, timings: (t1 - t0, t2 - t1, t3 - t2) })
 }
 
 /// The compiler flags without the precompiled header's `-include` (for other C files).
