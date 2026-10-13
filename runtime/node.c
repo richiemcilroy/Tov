@@ -1726,6 +1726,7 @@ static void tv_node_work_ready(tv_io *h, bool readable, bool writable, bool brok
         JSObjectRef cb = job->callback;
         if (job->free) job->free(job);
         free(job);
+        if (!cb) continue;
         JSValueRef exc = NULL;
         JSObjectCallAsFunction(tv_js_ctx, cb, NULL, nargs, args, &exc);
         JSValueUnprotect(tv_js_ctx, cb);
@@ -2512,6 +2513,9 @@ typedef struct {
     tv_io io;
     int fd;
     bool reading, closed, refed, counted, watching, listening, connecting;
+    bool file;         /* regular file or non-tty device: not poll-watchable, read on the work queue */
+    int pending_file;  /* file-read jobs in flight (the struct outlives JS while they're pending) */
+    bool zombie;       /* JS released the handle mid-read: free(s) when the last read lands */
     JSObjectRef self, onread;
     JSObjectRef onconnection, connect_cb;   /* listen: onconnection(fd | null, err); connect: cb(status) */
     tv_node_wreq *wq, *wq_tail;
@@ -2519,9 +2523,96 @@ typedef struct {
     double bytes_read, bytes_written;
 } tv_node_stream;
 
+/* a chunk read of a file fd on a worker thread (regular files aren't poll-watchable) */
+typedef struct {
+    tv_node_job job;
+    tv_node_stream *s;
+    int fd;
+    uint8_t buf[65536];
+    ssize_t n;
+    int err;
+} tv_node_fread;
+
+static void tv_node_fread_work(tv_node_job *j) {
+    tv_node_fread *r = (tv_node_fread *)j;
+    for (;;) {
+        ssize_t n = read(r->fd, r->buf, sizeof r->buf);
+        if (n < 0 && errno == EINTR) continue;
+        if (n > 0) r->n = n;
+        else r->err = n == 0 ? TV_UV_EOF : -errno;
+        return;
+    }
+}
+
+static void tv_node_file_read(JSContextRef ctx, tv_node_stream *s);
+static void tv_node_stream_update(tv_node_stream *s);
+
+/* a file job landed after the stream stopped, closed or was released: drop the callback
+   (the work loop skips a NULL one) and finish the close/free that waited on it */
+static size_t tv_node_file_landed(JSContextRef ctx, tv_node_job *j, tv_node_stream *s) {
+    JSValueUnprotect(ctx, j->callback);
+    j->callback = NULL;
+    if ((s->closed || s->zombie) && s->fd >= 0) { close(s->fd); s->fd = -1; }
+    if (s->zombie && !s->pending_file) free(s);
+    return 0;
+}
+
+static size_t tv_node_fread_done(JSContextRef ctx, tv_node_job *j, JSValueRef *args) {
+    tv_node_fread *r = (tv_node_fread *)j;
+    tv_node_stream *s = r->s;
+    s->pending_file--;
+    if (!s->closed && !s->zombie && s->reading) {
+        if (r->n > 0) {
+            s->bytes_read += (double)r->n;
+            args[0] = tv_js_bytes_copy(r->buf, (size_t)r->n);
+            tv_node_file_read(ctx, s);   /* (the next chunk, while the stream wants more) */
+            return 1;
+        }
+        s->reading = false;
+        tv_node_stream_update(s);
+        args[0] = JSValueMakeNull(ctx);
+        args[1] = JSValueMakeNumber(ctx, r->err);
+        return 2;
+    }
+    return tv_node_file_landed(ctx, j, s);
+}
+
+/* shutdown on a file fd also goes through the work queue: no writable event is coming */
+typedef struct {
+    tv_node_job job;
+    tv_node_stream *s;
+    int fd;
+    int err;
+} tv_node_fshutdown;
+
+static void tv_node_fshutdown_work(tv_node_job *j) {
+    tv_node_fshutdown *r = (tv_node_fshutdown *)j;
+    r->err = shutdown(r->fd, SHUT_WR) != 0 && errno != ENOTSOCK ? -errno : 0;
+}
+
+static size_t tv_node_fshutdown_done(JSContextRef ctx, tv_node_job *j, JSValueRef *args) {
+    tv_node_fshutdown *r = (tv_node_fshutdown *)j;
+    tv_node_stream *s = r->s;
+    s->pending_file--;
+    if (s->closed || s->zombie) return tv_node_file_landed(ctx, j, s);
+    args[0] = JSValueMakeNumber(ctx, r->err);
+    return 1;
+}
+
+static void tv_node_file_read(JSContextRef ctx, tv_node_stream *s) {
+    tv_node_fread *r = calloc(1, sizeof *r);
+    r->job.work = tv_node_fread_work;
+    r->job.done = tv_node_fread_done;
+    r->s = s;
+    r->fd = s->fd;
+    s->pending_file++;
+    tv_node_queue(ctx, &r->job, s->onread);
+}
+
 static void tv_node_stream_finalize(JSObjectRef o) {
     tv_node_stream *s = JSObjectGetPrivate(o);
     if (!s) return;
+    if (s->pending_file) { s->zombie = true; return; }   /* freed in tv_node_file_landed */
     if (s->fd >= 0) close(s->fd);
     free(s);
 }
@@ -2546,7 +2637,7 @@ static void tv_node_stream_ready(tv_io *h, bool readable, bool writable, bool br
 
 /* what the loop watches for, and whether the stream keeps the program running */
 static void tv_node_stream_update(tv_node_stream *s) {
-    bool want_read = (s->reading || s->listening) && !s->closed;
+    bool want_read = (s->reading || s->listening) && !s->closed && !s->file;
     bool want_write = !s->closed && (s->wq || s->shutdown_cb || s->connecting);
     if (s->fd >= 0 && !s->closed && (want_read || want_write || s->watching)) {
         s->io.ready = tv_node_stream_ready;
@@ -2677,6 +2768,11 @@ NATIVE(n_stream_open) {
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
     tv_node_stream *s = calloc(1, sizeof *s);
     s->fd = fd;
+    /* Regular files (and plain devices like /dev/null) can't be watched for
+       readability — reads go to the work queue, as libuv's fs reads do.
+       TTYs stay watched. */
+    struct stat st;
+    if (fstat(fd, &st) == 0 && (S_ISREG(st.st_mode) || (S_ISCHR(st.st_mode) && !isatty(fd)))) s->file = true;
     s->refed = true;
     JSObjectRef o = JSObjectMake(ctx, tv_node_stream_class(), s);
     s->self = o;
@@ -2694,6 +2790,7 @@ NATIVE(n_stream_read_start) {
     JSValueProtect(ctx, a[1]);
     s->reading = true;
     tv_node_stream_update(s);
+    if (s->file) tv_node_file_read(ctx, s);
     return num(ctx, 0);
 }
 
@@ -2802,6 +2899,16 @@ NATIVE(n_stream_shutdown) {
     tv_node_stream *s = tv_node_stream_of(ctx, n, a);
     if (!s || s->closed || n < 2) return num(ctx, -ENOTCONN);
     if (s->shutdown_cb) return num(ctx, -EALREADY);
+    if (s->file) {
+        tv_node_fshutdown *r = calloc(1, sizeof *r);
+        r->job.work = tv_node_fshutdown_work;
+        r->job.done = tv_node_fshutdown_done;
+        r->s = s;
+        r->fd = s->fd;
+        s->pending_file++;
+        tv_node_queue(ctx, &r->job, a[1]);
+        return num(ctx, 0);
+    }
     s->shutdown_cb = (JSObjectRef)a[1];
     JSValueProtect(ctx, a[1]);
     tv_node_stream_update(s);
@@ -2820,8 +2927,15 @@ NATIVE(n_stream_close) {
         tv_io_refs--;
         s->counted = false;
     }
-    if (s->fd >= 0) close(s->fd);
-    s->fd = -1;
+    if (s->fd >= 0) {
+        if (s->pending_file) {
+            /* a worker still owns a copy of this fd — the last landing
+               file job closes it (see tv_node_file_landed) */
+        } else {
+            close(s->fd);
+            s->fd = -1;
+        }
+    }
     while (s->wq) {
         tv_node_wreq *w = s->wq;
         s->wq = w->next;

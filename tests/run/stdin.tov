@@ -1,0 +1,8 @@
+import { stdin } from "node:process"
+import { createInterface } from "node:readline"
+
+// The harness gives every program /dev/null as stdin: readline sees an
+// immediate end, "close" fires, and the program must exit on its own.
+const rl = try createInterface({ input: stdin })
+try rl.on("line", (line: Js) => console.log(`line: ${line as string}`))
+try rl.on("close", () => console.log("closed"))
