@@ -1,0 +1,6 @@
+for readers 0,1,2,3
+for writers 10,11,12,13
+for shared 10,11,12,13
+of readers 2,4,6
+of writers 102,104,106
+of shared 102,104,106

@@ -1,0 +1,46 @@
+// Readers created before suspension and writers created after it share only their iteration.
+function sleep(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 0))
+}
+
+async function main() {
+  const readers: (() => int)[] = []
+  const writers: (() => int)[] = []
+  for (let i = 0; i < 6; i++) {
+    readers.push(() => i)
+    await sleep()
+    writers.push(() => {
+      i += 10
+      return i
+    })
+    if (i === 1) {
+      continue
+    }
+    if (i === 3) {
+      break
+    }
+  }
+  console.log("for readers", readers.map(f => f()).join(","))
+  console.log("for writers", writers.map(f => f()).join(","))
+  console.log("for shared", readers.map(f => f()).join(","))
+
+  const elements: (() => int)[] = []
+  const mutations: (() => int)[] = []
+  for (let x of [2, 4, 6, 8]) {
+    elements.push(() => x)
+    await sleep()
+    mutations.push(() => {
+      x += 100
+      return x
+    })
+    if (x === 4) {
+      continue
+    }
+    if (x === 6) {
+      break
+    }
+  }
+  console.log("of readers", elements.map(f => f()).join(","))
+  console.log("of writers", mutations.map(f => f()).join(","))
+  console.log("of shared", elements.map(f => f()).join(","))
+}

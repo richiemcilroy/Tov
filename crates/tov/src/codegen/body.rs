@@ -680,16 +680,27 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                     if let Some(fact) = facts.calls.get(&e)
                         && let ExprKind::Member { obj, name, .. } = &ast.expr(*callee).kind
-                            && let Callee::Method(_) = fact.callee
+                            && let Callee::Method(recv) = fact.callee
                         {
                             if is_mutating_method(self.c.interner.get(*name))
                                 && let Some(k) = root(*obj)
                             {
                                 mutated.insert(k);
                             }
-                            // (An async arrow's task can outlive the call: its environment is on the heap.)
-                            for a in args {
-                                if matches!(&ast.expr(a.expr).kind, ExprKind::Arrow(f) if !f.is_async) {
+                            // Only callback-consuming built-ins keep a direct arrow on the stack.
+                            // Methods such as `push` store their argument instead of invoking it.
+                            let sync_callback = match self.tget(recv) {
+                                Ty::Array(_) => matches!(self.c.interner.get(*name), "map" | "flatMap" | "filter" | "forEach" | "some" | "every" | "find" | "findIndex" | "reduce" | "sort"),
+                                Ty::Map(_, _) | Ty::Set(_) => self.c.interner.get(*name) == "forEach",
+                                _ => false,
+                            };
+                            if sync_callback && let Some(a) = args.first()
+                                && matches!(&ast.expr(a.expr).kind, ExprKind::Arrow(f) if !f.is_async)
+                            {
+                                let mut nested = Vec::new();
+                                collect_exprs_expr(ast, a.expr, &mut nested);
+                                // A nested closure can escape the call and needs heap captures.
+                                if !nested.iter().any(|&x| x != a.expr && matches!(ast.expr(x).kind, ExprKind::Arrow(_))) {
                                     stack_arrows.insert(a.expr);
                                 }
                             }
@@ -1288,6 +1299,13 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if let Some(i) = init {
                     self.stmt(*i);
                 }
+                let iteration_binding = init.and_then(|i| match &self.ast(m).stmt(i).kind {
+                    StmtKind::Let { mutable: true, name_span, .. } if self.b().boxed.contains(&name_span.start) => Some(name_span.start),
+                    _ => None,
+                });
+                if let Some(key) = iteration_binding {
+                    self.copy_iteration_binding(key);
+                }
                 let loop_exprs: Vec<ExprId> = [cond, step].into_iter().flatten().copied().collect();
                 let hoisted = self.hoist_unique(&[*body], &loop_exprs);
                 self.reserve_for_pushes(*init, *cond, *step, *body);
@@ -1304,6 +1322,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.b().in_bounds.pop();
                 }
                 self.line(format!("{cont}:;"));
+                if let Some(key) = iteration_binding {
+                    self.copy_iteration_binding(key);
+                }
                 if let Some(st) = step {
                     self.push_temps();
                     let _ = self.expr(*st);
@@ -1357,9 +1378,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                         self.line(format!("{ect} {var} = (({ect} *)tv_arr_data({sn}))[{idx}];"));
                     }
                 }
-                self.b().locals.insert(name_span.start, super::body::Local { access: var, ty: elem });
+                self.b().locals.insert(name_span.start, Local { access: var, ty: elem });
                 let hoisted = self.hoist_unique(&[*body], &[]);
-                self.loop_body(*body, &cont);
+                let binding = self.b().boxed.contains(&name_span.start).then_some(name_span.start);
+                self.loop_body_with_binding(*body, &cont, binding);
                 self.unhoist(hoisted);
                 self.line(format!("{cont}:;"));
                 self.close("}");
@@ -1610,10 +1632,44 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.line(format!("if (!{cv}) break;"));
     }
 
+    /// Replace the owning cell before an iteration starts, leaving earlier closures on
+    /// the old binding. The scope's release refers to the reassigned cell pointer.
+    fn copy_iteration_binding(&mut self, key: u32) {
+        let local = self.b().locals[&key].clone();
+        let cell = local.access.trim_end_matches("->v");
+        let ct = self.cell_type(local.ty);
+        let next = self.fresh("iteration");
+        self.line(format!("{ct} *{next} = tvg_alloc_small(sizeof({ct})); {next}->rc = 1; {next}->v = {};", local.access));
+        if self.is_rc(local.ty) {
+            let retain = self.retain_code(local.ty, &format!("{next}->v"));
+            self.line(format!("{retain};"));
+        }
+        let release = self.cell_release(local.ty, cell);
+        self.line(release);
+        self.line(format!("{cell} = {next};"));
+    }
+
     fn loop_body(&mut self, body: StmtId, cont: &str) {
+        self.loop_body_with_binding(body, cont, None);
+    }
+
+    fn loop_body_with_binding(&mut self, body: StmtId, cont: &str, binding: Option<u32>) {
         self.push_scope();
+        if let Some(key) = binding {
+            let local = self.b().locals[&key].clone();
+            let ct = self.cell_type(local.ty);
+            let cell = self.fresh("iteration");
+            self.line(format!("{ct} *{cell} = tvg_alloc_small(sizeof({ct})); {cell}->rc = 1; {cell}->v = {};", local.access));
+            if self.is_rc(local.ty) {
+                let retain = self.retain_code(local.ty, &format!("{cell}->v"));
+                self.line(format!("{retain};"));
+            }
+            let release = self.cell_release(local.ty, &cell);
+            self.b().scopes.last_mut().unwrap().releases.push(release);
+            self.b().locals.insert(key, Local { access: format!("{cell}->v"), ty: local.ty });
+        }
         let depth = self.b().scopes.len();
-        self.b().loops.push((cont.to_string(), depth));
+        self.b().loops.push((cont.to_string(), depth - 1));
         self.b().breaks.push((BreakTarget::Native, depth - 1));
         let m = self.cur_m();
         if let StmtKind::Block(ss) = &self.ast(m).stmt(body).kind {

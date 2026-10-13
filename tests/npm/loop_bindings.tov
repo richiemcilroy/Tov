@@ -1,0 +1,19 @@
+import { store, run } from "loop-callbacks"
+
+function main() {
+  for (let i = 0; i < 3; i++) {
+    try store(() => i)
+  }
+  console.log(try run() as string)
+  for (let i = 0; i < 3; i++) {
+    try store(() => {
+      i += 10
+      return i
+    })
+  }
+  console.log(try run() as string)
+  for (const x of [0, 1, 2]) {
+    try store(() => x)
+  }
+  console.log(try run() as string)
+}

@@ -1,0 +1,104 @@
+// Escaping closures share a binding within an iteration, not across iterations.
+function fromLoop(): () => int {
+  for (let i = 7; i < 8; i++) {
+    return () => i
+  }
+  return () => -1
+}
+
+function main() {
+  for (let i = 0; i < 3; i++) {
+    setTimeout(() => console.log(`timer ${i}`), 0)
+  }
+  const readers: (() => int)[] = []
+  const changers: (() => int)[] = []
+  for (let i = 0; i < 3; i++) {
+    readers.push(() => i)
+    changers.push(() => {
+      i += 10
+      return i
+    })
+    setTimeout(() => console.log(`mutated timer ${i}`), 0)
+  }
+  console.log("readers", readers.map(f => f()).join(","))
+  console.log("changed", changers.map(f => f()).join(","))
+  console.log("shared", readers.map(f => f()).join(","))
+
+  const copies: (() => int)[] = []
+  for (let i = 0; i < 6; i++) {
+    copies.push(() => i)
+    if (i === 1) {
+      i += 1
+      continue
+    }
+    if (i === 4) {
+      break
+    }
+  }
+  console.log("control", copies.map(f => f()).join(","))
+
+  // Mutation in the body is copied before the update, which gets a new binding.
+  const mutated: (() => int)[] = []
+  for (let i = 0; i < 5; i++) {
+    const change = () => {
+      i += 1
+    }
+    mutated.push(() => i)
+    change()
+  }
+  console.log("body", mutated.map(f => f()).join(","))
+
+  for (const x of [0, 1, 2]) {
+    setTimeout(() => console.log(`const ${x}`), 0)
+  }
+  const elements: (() => int)[] = []
+  for (let x of [0, 1, 2]) {
+    elements.push(() => {
+      x += 10
+      return x
+    })
+    if (x === 0) {
+      continue
+    }
+    if (x === 1) {
+      break
+    }
+  }
+  console.log("elements", elements.map(f => f()).join(","))
+
+  const strings: (() => string)[] = []
+  for (let text = ""; text.byteLength < 3; text += "x") {
+    strings.push(() => text)
+  }
+  console.log("strings", strings.map(f => f()).join("|"))
+  const words: (() => string)[] = []
+  for (let word of ["a", "b", "c"]) {
+    words.push(() => {
+      word += "!"
+      return word
+    })
+    continue
+  }
+  console.log("words", words.map(f => f()).join(","))
+  console.log("return", fromLoop()())
+
+  const nested: (() => int)[] = []
+  for (let i = 0; i < 3; i++) {
+    const batch = [0].map(x => {
+      return () => i
+    })
+    nested.push(batch[0]!)
+  }
+  console.log("nested", nested.map(f => f()).join(","))
+
+  // The update and the following condition use the same next-iteration binding.
+  const updates: (() => int)[] = []
+  for (let i = 0; i < 3 && (() => {
+    i += 1
+    return true
+  })(); (() => {
+    updates.push(() => i)
+    i++
+  })()) {}
+  console.log("update", updates.map(f => f()).join(","))
+}
