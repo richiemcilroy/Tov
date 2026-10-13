@@ -130,6 +130,9 @@ struct Local {
     ty: TyId,
     kind: LocalKind,
     span: Span,
+    /// The module `(module, item)` this local shadows, when it stands in for a top-level
+    /// `const`/`let` so flow narrowing can see it: reads and writes still resolve globally.
+    global: Option<(u32, u32)>,
     /// Span of the `const` keyword, for "change to `let`" fixes.
     kw_span: Option<Span>,
     /// `let x = <int literal>` without annotation: may become `f64` from later uses.
@@ -1210,14 +1213,14 @@ impl<'a> Checker<'a> {
             fcx.frames.push(frame);
             fcx.class = class;
             if let Some(t) = &this {
-                fcx.locals.push(Local { name: THIS_SYM, ty: t.ty, kind: LocalKind::Param, span: f.name_span, kw_span: None, promotable: false, frame: 0 });
+                fcx.locals.push(Local { name: THIS_SYM, ty: t.ty, kind: LocalKind::Param, span: f.name_span, kw_span: None, promotable: false, frame: 0, global: None });
                 fcx.scopes[0].push((THIS_SYM, fcx.locals.len() - 1, None));
                 fcx.this_key = Some(f.name_span.start);
                 fcx.ctor = t.ctor;
             }
             for (p, fp) in f.params.iter().zip(&sig.params) {
                 let kind = if p.inout { LocalKind::Inout } else { LocalKind::Param };
-                fcx.locals.push(Local { name: p.name, ty: fp.ty, kind, span: p.span, kw_span: None, promotable: false, frame: 0 });
+                fcx.locals.push(Local { name: p.name, ty: fp.ty, kind, span: p.span, kw_span: None, promotable: false, frame: 0, global: None });
                 let id = fcx.locals.len() - 1;
                 fcx.scopes[0].push((p.name, id, None));
             }
@@ -1955,14 +1958,14 @@ impl<'a> Checker<'a> {
         let fcx = self.fcx.last_mut().unwrap();
         let frame = fcx.frames.len().saturating_sub(1);
         if let Some(scope) = fcx.scopes.last()
-            && let Some(&(_, prev, _)) = scope.iter().find(|(s, id, _)| *s == name && fcx.locals[*id].frame == frame && fcx.locals[*id].span != span) {
+            && let Some(&(_, prev, _)) = scope.iter().find(|(s, id, _)| *s == name && fcx.locals[*id].frame == frame && fcx.locals[*id].span != span && fcx.locals[*id].global.is_none()) {
                 let prev_span = fcx.locals[prev].span;
                 let (line, _) = self.sm.get(prev_span.file).line_col(prev_span.start);
                 let n = self.interner.get(name).to_string();
                 self.diags.push(Diagnostic::new("N0003", span, format!("`{n}` is already declared in this scope")).note("previous", format!("line {line}")));
             }
         let fcx = self.fcx.last_mut().unwrap();
-        fcx.locals.push(Local { name, ty, kind, span, kw_span, promotable, frame });
+        fcx.locals.push(Local { name, ty, kind, span, kw_span, promotable, frame, global: None });
         let id = fcx.locals.len() - 1;
         fcx.scopes.last_mut().unwrap().push((name, id, None));
         id

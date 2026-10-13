@@ -15,4 +15,19 @@ error[T0001] narrowing_soundness.tov:47:12: expected `int`, found `int | undefin
   fix[placeholder]: provide a default: `?? <default>`
   fix[maybe]: assert it is defined (traps if not): `!`
 
-3 error(s)
+error[T0120] narrowing_soundness.tov:68:15: `ml` may be `undefined`
+   68 |   console.log(ml.v)
+  narrow first: `if (ml !== undefined) { ... }`
+  fix[maybe]: optional chaining: `ml?.v`
+  fix[maybe]: assert defined (traps if not): `ml!.v`
+
+error[T0120] narrowing_soundness.tov:74:15: `ma` may be `undefined`
+   74 |   console.log(ma.v)
+  narrow first: `if (ma !== undefined) { ... }`
+  fix[maybe]: optional chaining: `ma?.v`
+  fix[maybe]: assert defined (traps if not): `ma!.v`
+
+error[T0107] narrowing_soundness.tov:74:18: `never` has no field `v`
+   74 |   console.log(ma.v)
+
+6 error(s)

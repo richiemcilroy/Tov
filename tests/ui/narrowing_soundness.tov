@@ -48,3 +48,28 @@ function h(x0: int | undefined): int {
   }
   return 0
 }
+
+// Top-level bindings narrow like locals: a `const` guard holds for the rest of
+// the script; a `let` guard is forgotten across calls (a callee may reassign it),
+// and is replaced by what later assignments give it.
+type M = { v: int }
+function makeM(): M | undefined { return { v: 1 } }
+function noop() {}
+
+const mg = makeM()
+if (mg !== undefined) {
+  noop()
+  console.log(mg.v)
+}
+
+let ml = makeM()
+if (ml !== undefined) {
+  noop()
+  console.log(ml.v)
+}
+
+let ma = makeM()
+if (ma !== undefined) {
+  ma = undefined
+  console.log(ma.v)
+}

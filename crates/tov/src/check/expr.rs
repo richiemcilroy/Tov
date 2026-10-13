@@ -267,8 +267,13 @@ impl<'a> Checker<'a> {
 
     fn ident(&mut self, e: ExprId, sym: Sym, span: Span) -> TyId {
         if let Some((id, ty)) = self.lookup(sym) {
-            let key = self.local(id).span.start;
-            self.rec_ident(e, IdentFact::Local(key));
+            // (a script-local standing in for a top-level `const`/`let`: still a global read)
+            if let Some((m, i)) = self.local(id).global {
+                self.rec_ident(e, IdentFact::Const(m, i));
+            } else {
+                let key = self.local(id).span.start;
+                self.rec_ident(e, IdentFact::Local(key));
+            }
             self.fcx().reads.push((id, span.start));
             return ty;
         }
@@ -1012,7 +1017,11 @@ impl<'a> Checker<'a> {
                 self.root_of(*obj)
             }
             ExprKind::Ident(s) => match self.lookup(*s) {
-                Some((id, _)) => Root::Local(id),
+                // (a script-local standing in for a top-level binding is still a global)
+                Some((id, _)) => match self.local(id).global {
+                    Some((m, i)) => Root::ModuleConst(m, i),
+                    None => Root::Local(id),
+                },
                 None => match self.scopes[self.cur as usize].values.get(s).map(|d| d.0) {
                     Some(Decl::Const(m, i)) => Root::ModuleConst(m, i),
                     _ => Root::Temp,
@@ -1082,7 +1091,7 @@ impl<'a> Checker<'a> {
         match &node.kind {
             ExprKind::Paren(x) | ExprKind::NonNull(x) => self.place(*x, _for_ref),
             ExprKind::Ident(sym) => {
-                if let Some((id, ty)) = self.lookup(*sym) {
+                if let Some((id, ty)) = self.lookup(*sym).filter(|(id, _)| self.local(*id).global.is_none()) {
                     let key = self.local(id).span.start;
                     self.rec_ident(e, IdentFact::Local(key));
                     let declared = self.fcx.last().unwrap().locals[id].ty;
@@ -1135,7 +1144,12 @@ impl<'a> Checker<'a> {
                             f.expr_ty[e as usize] = ty;
                             f.mutated_globals.insert((cm, ci));
                         }
-                        Some(Place { ty, local: None, root: None })
+                        // The assignment narrows the script-local standing in for it (as a
+                        // local's would); the place itself is still the global.
+                        let local = (cm == self.cur)
+                            .then(|| self.fcx().locals.iter().position(|l| l.global == Some((cm, ci))))
+                            .flatten();
+                        Some(Place { ty, local, root: local })
                     }
                     Some(Decl::Fn(..)) => {
                         self.report(Diagnostic::new("V0105", span, format!("can't assign to function `{n}`")));

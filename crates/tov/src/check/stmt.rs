@@ -18,7 +18,17 @@ impl<'a> Checker<'a> {
             StmtKind::Empty | StmtKind::Error => {}
             StmtKind::InitGlobal(ii) => {
                 let m = self.cur;
-                self.const_type(m, *ii);
+                let t = self.const_type(m, *ii);
+                // A top-level `const`/`let` lives in module scope, which `lookup` can't see —
+                // give the script a marked local too, or `if (x !== undefined)` can't narrow
+                // it (and the effects machinery can't track it). `Local::global` keeps its
+                // reads and writes resolving as the global, so codegen is unaffected.
+                if let ItemKind::Const { name, mutable, name_span, .. } = &self.modules[m as usize].ast.items[*ii as usize].kind {
+                    let (name, mutable, name_span) = (*name, *mutable, *name_span);
+                    let kind = if mutable { LocalKind::Let } else { LocalKind::Const };
+                    let id = self.declare(name, t, kind, name_span, None, false);
+                    self.fcx().locals[id].global = Some((m, *ii));
+                }
                 if self.const_throws.contains(&(m, *ii)) {
                     let err = self.error_class();
                     self.cur_frame().thrown.push(err);
@@ -394,11 +404,18 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Forgets every narrowing of a path through a class instance.
+    /// Forgets what a call may have changed: every narrowing of a path through a class
+    /// instance, and every narrowing of a mutable global (any callee can reassign one).
     pub(super) fn invalidate_heap(&mut self) {
         let paths = std::mem::take(&mut self.fcx().heap_paths);
         for (l, p) in paths {
             self.narrow_path(l, p, None);
+        }
+        let globals: Vec<LocalId> = self.fcx().locals.iter().enumerate().filter(|(_, l)| l.global.is_some() && l.kind == LocalKind::Let).map(|(i, _)| i).collect();
+        for id in globals {
+            let declared = self.local(id).ty;
+            self.narrow(id, declared);
+            self.narrow_path(id, Vec::new(), None);
         }
     }
 
