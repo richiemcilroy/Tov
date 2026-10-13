@@ -1,0 +1,3 @@
+plain 1 "" true
+listened 0 "listener: seen\nwent on\n" false
+handledLater 0 "caught: late\n" false

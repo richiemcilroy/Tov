@@ -1482,6 +1482,8 @@ static void tv_js_waiter_finalize(JSObjectRef f) {
     }
 }
 
+JSObjectRef tv_js_handled_hook;
+
 tv_promise *tv_js_await(JSValueRef v) {
     JSContextRef ctx = tv_js();
     tv_promise *p = tv_promise_new(&tv_type_js);
@@ -1507,6 +1509,8 @@ tv_promise *tv_js_await(JSValueRef v) {
     JSValueRef fns[2] = {JSObjectMake(ctx, tv_js_fulfill_class, w), JSObjectMake(ctx, tv_js_reject_class, w)};
     JSValueRef exc = NULL;
     JSObjectCallAsFunction(ctx, (JSObjectRef)then, (JSObjectRef)v, 2, fns, &exc);
+    /* (JavaScriptCore may have reported it unhandled already, when the call that made it returned) */
+    if (tv_js_handled_hook) JSObjectCallAsFunction(ctx, tv_js_handled_hook, NULL, 1, &v, NULL);
     if (exc && w->p) {
         /* `then` threw: the await rejects with that */
         tv_js_waiter_settle(ctx, (JSObjectRef)fns[1], 1, &exc, false);

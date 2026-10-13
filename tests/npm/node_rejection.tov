@@ -1,0 +1,5 @@
+import run from "node-rejection"
+
+async function main() {
+  try await run()
+}

@@ -254,6 +254,8 @@ void tv_js_settle(tv_js_deferred *d, JSValueRef value, bool ok);   /* resolves (
 
 /* Tov awaiting a JavaScript value: a Tov promise (of Js) settled when `v` settles (now, if `v`
  * isn't a thenable). A rejection becomes a JsError holding the reason. */
+/* (set by runtime/node.c: told about each promise Tov awaits, which handles its rejection) */
+extern JSObjectRef tv_js_handled_hook;
 tv_promise *tv_js_await(JSValueRef v);
 
 #endif /* TOV_JS_H */

@@ -255,6 +255,28 @@ native.setFatalHandler?.((err) => {
   return true;
 });
 
+// a rejection nobody handled: to 'unhandledRejection' listeners if there are any, else an uncaught
+// exception (Node.js's default, --unhandled-rejections=throw). Judged on the loop's next turn, as
+// Node.js does: Tov code may still await it (JavaScriptCore reports one as soon as the call that
+// made it returns, before Tov's await attaches; the second callback hears of that).
+const pendingRejections = new Map();
+function reportRejections() {
+  for (const [promise, reason] of pendingRejections) {
+    pendingRejections.delete(promise);
+    if (emitter && process.listenerCount('unhandledRejection') > 0) {
+      process.emit('unhandledRejection', reason, promise);
+    } else {
+      native.fatal(reason);
+    }
+  }
+}
+native.setRejectionHandler?.((promise, reason) => {
+  if (pendingRejections.size === 0) require('timers').setImmediate(reportRejections);
+  pendingRejections.set(promise, reason);
+}, (promise) => {
+  if (pendingRejections.size !== 0) pendingRejections.delete(promise);
+});
+
 // for the host: whether anything can be listening (to 'exit' and 'beforeExit')
 Object.defineProperty(process, '_tovEmitter', { __proto__: null, get: () => emitter, enumerable: false, configurable: true });
 
