@@ -679,6 +679,13 @@ static JSValueRef tv_js_read_file_fn(JSContextRef ctx, JSObjectRef f, JSObjectRe
     FILE *fp = fopen(path.p->data, "rb");
     tv_str_release(path);
     if (!fp) return JSValueMakeUndefined(ctx);
+    /* (a directory opens too, and reads as nothing: it isn't a file, so a require of one goes on
+     * to its index.js) */
+    struct stat st;
+    if (fstat(fileno(fp), &st) != 0 || S_ISDIR(st.st_mode)) {
+        fclose(fp);
+        return JSValueMakeUndefined(ctx);
+    }
     /* (a second argument: whether it's there, without reading it) */
     if (n > 1 && JSValueToBoolean(ctx, a[1])) {
         fclose(fp);
@@ -776,6 +783,44 @@ static uint64_t tv_js_host_due(uint64_t now_ms) {
 
 static void tv_js_host_run(void) {
     TVRunLoopCycle();
+}
+
+/* The engine's threads hand work back to the run loop (WebAssembly they compiled) and wake it,
+ * from their thread, through a pipe the event loop watches (unref'd: the work keeps the program
+ * running only while it's underway, tv_js_host_busy). Made the first time there's such work, so
+ * a program that never has any sleeps as it did. */
+static int tv_js_wake_pipe[2] = {-1, -1};
+static tv_io tv_js_wake_io;
+
+static void tv_js_wake(void) {
+    char b = 0;
+    if (tv_js_wake_pipe[1] >= 0) (void)!write(tv_js_wake_pipe[1], &b, 1);
+}
+
+static void tv_js_wake_ready(tv_io *h, bool readable, bool writable, bool broken) {
+    (void)h; (void)readable; (void)writable; (void)broken;
+    char buf[64];
+    while (read(tv_js_wake_pipe[0], buf, sizeof buf) > 0) {}
+    TVRunLoopCycle();
+}
+
+/* (weak: an engine built before it has none, and the program ends while that work is underway, as
+ * it did; scripts/jsc/build.sh rebuilds it) */
+extern bool TVHasImminentWork(JSContextRef ctx) __attribute__((weak_import));
+
+static bool tv_js_host_busy(void) {
+    if (!tv_js_ctx || !TVHasImminentWork || !TVHasImminentWork(tv_js_ctx)) return false;
+    if (tv_js_wake_pipe[0] < 0) {
+        if (pipe(tv_js_wake_pipe) != 0) tv_trap("can't create a pipe for the engine's threads", NULL);
+        for (int i = 0; i < 2; i++) {
+            fcntl(tv_js_wake_pipe[i], F_SETFL, fcntl(tv_js_wake_pipe[i], F_GETFL) | O_NONBLOCK);
+            fcntl(tv_js_wake_pipe[i], F_SETFD, FD_CLOEXEC);
+        }
+        tv_js_wake_io.ready = tv_js_wake_ready;
+        tv_io_add(tv_js_wake_pipe[0], &tv_js_wake_io, true, false);
+        TVRunLoopSetWakeUp(tv_js_wake);
+    }
+    return true;
 }
 #elif defined(__APPLE__)
 /* JavaScriptCore's timers (the incremental sweeper, the next full collection, FinalizationRegistry
@@ -966,6 +1011,9 @@ JSContextRef tv_js_start(void) {
 #endif
     tv_loop_host_due = tv_js_host_due;
     tv_loop_host_run = tv_js_host_run;
+#ifdef TV_JSC_OWN
+    tv_loop_host_busy = tv_js_host_busy;
+#endif
     tv_loop_idle = tv_js_idle;
     /* values made without the engine (js.h): only if it encodes them as expected */
     tv_js_encoded = tv_js_bits(JSValueMakeNumber(ctx, 1.5)) == 0x3ffa000000000000ull && tv_js_bits(JSValueMakeNumber(ctx, -1)) == 0xfffe0000ffffffffull

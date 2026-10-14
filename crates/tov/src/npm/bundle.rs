@@ -603,8 +603,9 @@ function __tov_find(spec, from) {
 // A file the bundle doesn't hold, read from disk where the program runs (JSON, or CommonJS:
 // `require(path.join(dir, name))`); its own requires go through the same fallbacks.
 var __tov_disk_cache = new Map();
-// a package installed where the program runs: its entry (main, or exports' require/default)
-function __tov_disk_package(spec, from) {
+// a package installed where the program runs, in the node_modules nearest `from`: the path of
+// its entry (main, or exports' require/default), or of the file named under it ("pkg/lib.so")
+function __tov_disk_package_path(spec, from) {
   var parts = spec.split("/"), scoped = spec[0] === "@";
   var pkg = parts.slice(0, scoped ? 2 : 1).join("/"), sub = parts.slice(scoped ? 2 : 1).join("/");
   for (var d = __tov_dirname(from); ; d = __tov_dirname(d)) {
@@ -616,17 +617,33 @@ function __tov_disk_package(spec, from) {
         while (m && typeof m === "object") m = Array.isArray(m) ? m[0] : (m.require || m.node || m.default || m.import);
         target = typeof m === "string" && m[0] === "." ? m : (j.main || "index.js");
       }
-      var path = __tov_join(base, target);
-      if (!__tov_by_name) { __tov_by_name = new Map(); for (var i = 0; i < __tov_count; i++) __tov_by_name.set(__tov_name(i), i); }
-      var exts = ["", ".js", ".json", "/index.js"];
-      for (var k = 0; k < exts.length; k++) {
-        var hit = __tov_by_name.get(path + exts[k]);
-        if (hit !== undefined) return __tov_load(hit);
-      }
-      return __tov_disk(path, "/");
+      return __tov_join(base, target);
     }
     if (d === "/" || d === "") return undefined;
   }
+}
+// a package installed where the program runs: its entry, loaded (from the bundle if it's there)
+function __tov_disk_package(spec, from) {
+  var path = __tov_disk_package_path(spec, from);
+  if (path === undefined) return undefined;
+  if (!__tov_by_name) { __tov_by_name = new Map(); for (var i = 0; i < __tov_count; i++) __tov_by_name.set(__tov_name(i), i); }
+  var exts = ["", ".js", ".json", "/index.js"];
+  for (var k = 0; k < exts.length; k++) {
+    var hit = __tov_by_name.get(path + exts[k]);
+    if (hit !== undefined) return __tov_load(hit);
+  }
+  return __tov_disk(path, "/");
+}
+// require.resolve of a file the bundle doesn't hold (a platform package's native library or
+// .wasm, `require.resolve("pkg-linux-x64/lib.so")`): its path where the program runs, found as
+// __tov_disk finds what it loads; undefined if there's none
+function __tov_disk_resolve(spec, from) {
+  if (typeof __tov_read_file !== "function" || spec.slice(0, 5) === "node:") return undefined;
+  var p = spec[0] === "/" || spec[0] === "." ? __tov_join(__tov_dirname(from), spec) : __tov_disk_package_path(spec, from);
+  if (p === undefined) return undefined;
+  var exts = ["", ".js", ".json", ".node", "/index.js", "/index.json"];
+  for (var k = 0; k < exts.length; k++) if (__tov_read_file(p + exts[k], true)) return p + exts[k];
+  return undefined;
 }
 function __tov_disk(spec, from) {
   if (typeof __tov_read_file !== "function") return undefined;
@@ -693,7 +710,7 @@ function __tov_load(id) {
     }
     return __tov_load(to);
   };
-  require.resolve = function (spec) { var to = map[spec]; if (to === undefined && typeof spec === "string") to = __tov_find(spec, name); if (to === undefined) { var e = new Error("Cannot find module '" + spec + "'"); e.code = "MODULE_NOT_FOUND"; throw e; } return __tov_name(to); };
+  require.resolve = function (spec) { var to = map[spec]; if (to === undefined && typeof spec === "string") to = __tov_find(spec, name); if (to === undefined && typeof spec === "string") { var disk = __tov_disk_resolve(spec, name); if (disk !== undefined) return disk; } if (to === undefined) { var e = new Error("Cannot find module '" + spec + "'"); e.code = "MODULE_NOT_FOUND"; throw e; } return __tov_name(to); };
   require.cache = {};
   require.main = undefined;
   require.extensions = __tov_extensions;
@@ -727,7 +744,9 @@ Object.defineProperty(globalThis, "__tov_modules", { value: {
     if (to !== undefined) return { exports: __tov_load(to) };
     var d = __tov_disk(spec, from);
     return d === undefined ? undefined : { exports: d };
-  } } });
+  },
+  // require.resolve of a file on disk where the program runs (not bundled); undefined if none
+  resolveFrom: function (spec, from) { return __tov_disk_resolve(spec, from); } } });
 globalThis.__tov_npm = function (spec) { return __tov_load(entries[spec]); };
 })();
 "#;

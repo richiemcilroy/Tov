@@ -35,6 +35,9 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__GLIBC__)
+#include <gnu/libc-version.h>
+#endif
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
@@ -246,6 +249,13 @@ NATIVE(n_info) {
     set(ctx, o, "arch", str(ctx, tv_node_arch()));
     const char *base = strrchr(exe, '/');
     set(ctx, o, "title", str(ctx, base ? base + 1 : exe));
+#if defined(__GLIBC__)
+    /* (the C library's version, running and built against: process.report's header says them) */
+    set(ctx, o, "glibcVersionRuntime", str(ctx, gnu_get_libc_version()));
+    char compiled[16];
+    snprintf(compiled, sizeof compiled, "%d.%d", __GLIBC__, __GLIBC_MINOR__);
+    set(ctx, o, "glibcVersionCompiler", str(ctx, compiled));
+#endif
     return o;
 }
 

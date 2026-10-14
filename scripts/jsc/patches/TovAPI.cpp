@@ -9,6 +9,7 @@
 #include "CachedTypes.h"
 #include "CodeCache.h"
 #include "Completion.h"
+#include "DeferredWorkTimer.h"
 #include "InitializeThreading.h"
 #include "IntlCache.h"
 #include "JSCInlines.h"
@@ -158,6 +159,13 @@ void TVRunLoopSetWakeUp(void (*wake)(void))
     RunLoop::setWakeUpCallback([wake] {
         wake();
     });
+}
+
+bool TVHasImminentWork(JSContextRef ctx)
+{
+    VM& vm = toJS(ctx)->vm();
+    JSLockHolder locker(vm);
+    return vm.deferredWorkTimer->hasImminentlyScheduledWork();
 }
 
 JSObjectRef TVMakeUint8Array(JSContextRef ctx, size_t len, void** bytes)

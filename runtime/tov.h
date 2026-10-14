@@ -631,6 +631,11 @@ extern bool tv_loop_check_pending, tv_loop_check_ref;
  * running. */
 extern uint64_t (*tv_loop_host_due)(uint64_t now_ms);
 extern void (*tv_loop_host_run)(void);
+/* Whether the engine has work underway on its threads that it hands back soon (WebAssembly
+ * compiled off the thread, for a promise the program awaits): unlike its timers, it keeps the
+ * program running. While it does, a descriptor is watched (tv_io) that its threads wake the loop
+ * with when they hand the work back. */
+extern bool (*tv_loop_host_busy)(void);
 /* Called once the loop has been idle (no I/O, no timers firing) for a second after doing work,
  * and again (deep) after 2.5 s to 20 s (adapting to how soon work comes back after a drop: see
  * runtime/tov.c): the engine collects its garbage then and gives the memory back, and deep,

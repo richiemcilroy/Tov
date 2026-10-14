@@ -1,0 +1,6 @@
+report header true true
+libc true
+require.resolve true
+import.meta.resolve true
+missing MODULE_NOT_FOUND
+wasm add 5

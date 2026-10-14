@@ -72,6 +72,7 @@
 #endif
 
 #if (GCC_PREREQ(8, 1) || CLANG_PREREQ(6, 0, 10000000) || MSVC_PREREQ(1920)) && \
+	!(CLANG_PREREQ(18, 0, 18000000) && !CLANG_PREREQ(19, 0, 19000000)) && \
 	!defined(LIBDEFLATE_ASSEMBLER_DOES_NOT_SUPPORT_AVX512VNNI)
 /*
  * AVX512VNNI implementation using 256-bit vectors.  This is very similar to the
@@ -82,7 +83,7 @@
  */
 #  define adler32_x86_avx512_vl256_vnni	adler32_x86_avx512_vl256_vnni
 #  define SUFFIX				   _avx512_vl256_vnni
-#  define ATTRIBUTES		_target_attribute("avx512bw,avx512vl,avx512vnni" NO_EVEX512)
+#  define ATTRIBUTES		_target_attribute("avx512bw,avx512vl,avx512vnni")
 #  define VL			32
 #  define USE_VNNI		1
 #  define USE_AVX512		1
@@ -94,7 +95,7 @@
  */
 #  define adler32_x86_avx512_vl512_vnni	adler32_x86_avx512_vl512_vnni
 #  define SUFFIX				   _avx512_vl512_vnni
-#  define ATTRIBUTES		_target_attribute("avx512bw,avx512vnni" EVEX512)
+#  define ATTRIBUTES		_target_attribute("avx512bw,avx512vnni")
 #  define VL			64
 #  define USE_VNNI		1
 #  define USE_AVX512		1

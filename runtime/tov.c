@@ -3779,6 +3779,7 @@ static void tv_loop_run_check(void) {
 
 uint64_t (*tv_loop_host_due)(uint64_t now_ms);
 void (*tv_loop_host_run)(void);
+bool (*tv_loop_host_busy)(void);
 static uint64_t tv_loop_host_at, tv_loop_host_asked;
 
 void (*tv_loop_idle)(bool deep);
@@ -3841,7 +3842,10 @@ void tv_async_run(void) {
         }
         while (tv_ntimers && !tv_timers[0].cb.fn) (void)tv_timer_pop();
         bool check = tv_loop_check_pending;
-        if (!tv_live_timers && !(check && tv_loop_check_ref)) return;
+        /* (the engine's threads at work for the program keep it running; asked before the
+         * descriptors below: the first time, it starts watching the one they wake the loop with) */
+        bool host_busy = tv_loop_host_busy && tv_loop_host_busy();
+        if (!tv_live_timers && !(check && tv_loop_check_ref) && !host_busy) return;
         /* descriptors are watched that don't keep the program running (a signal's pipe, an
          * unref'd socket): the timers wait on them too */
         if (tv_http_q >= 0) {
@@ -4786,11 +4790,11 @@ static bool tv_http_service(tv_http_conn *c, bool readable, bool broken) {
 
 static char tv_http_timer_tag;   /* the loop's timer event (the next setTimeout) */
 
-/* whether the loop goes on: servers, connections or ref'd I/O, a ref'd check phase, or (run for
- * timers, see tv_async_run) timers */
+/* whether the loop goes on: servers, connections or ref'd I/O, a ref'd check phase, (run for
+ * timers, see tv_async_run) timers, or the engine's threads at work for the program */
 static bool tv_http_alive(void) {
     return tv_http_active > 0 || tv_http_conns || tv_io_refs > 0 || (tv_loop_check_pending && tv_loop_check_ref)
-        || (tv_loop_for_timers && tv_live_timers > 0);
+        || (tv_loop_for_timers && tv_live_timers > 0) || (tv_loop_host_busy && tv_loop_host_busy());
 }
 
 /* Runs the event loop until every server has stopped and its connections have closed; timers

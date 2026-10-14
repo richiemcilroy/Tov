@@ -1,0 +1,6 @@
+// The process as packages see it (tests/npm/node_modules/node-process-io).
+import { run } from "node-process-io"
+
+async function main() {
+  try await run()
+}

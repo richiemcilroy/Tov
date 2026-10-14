@@ -41,6 +41,10 @@ JS_EXPORT double TVRunLoopSecondsUntilWork(void);
 JS_EXPORT void TVRunLoopCycle(void);
 JS_EXPORT void TVRunLoopSetWakeUp(void (*wake)(void));
 
+/* Whether the engine's threads have work underway they'll hand back soon (WebAssembly being
+ * compiled off the thread for a promise): the program isn't done while they do. */
+JS_EXPORT bool TVHasImminentWork(JSContextRef ctx);
+
 /* A new Uint8Array of `len` bytes, uninitialized, its bytes at *bytes for the caller to fill
  * before anything else runs; NULL if out of memory. Unlike JSObjectGetTypedArrayBytesPtr's, its
  * buffer isn't pinned (a stream can transfer it), and a small one has none until asked for. */

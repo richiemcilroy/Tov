@@ -4,7 +4,8 @@
 // installs). It costs one native call to make: the fields are plain values, and everything that
 // needs another module (EventEmitter, nextTick, warnings, stdio) loads it on first use, so a
 // package that only reads process.env starts nothing else. The natives this uses:
-//   info()          { argv, execArgv, execPath, pid, ppid, platform, arch, title }
+//   info()          { argv, execArgv, execPath, pid, ppid, platform, arch, title, and with glibc
+//                   glibcVersionRuntime, glibcVersionCompiler }
 //   env()           the environment, as an object
 //   cwd() / chdir(path) / exit(code) / umask(mask)
 //   hrtime()        nanoseconds since the program started (a number)
@@ -192,7 +193,18 @@ process.getActiveResourcesInfo = () => [];
 process.setUncaughtExceptionCaptureCallback = (fn) => { process._uncaughtCapture = fn; };
 process.hasUncaughtExceptionCaptureCallback = () => typeof process._uncaughtCapture === 'function';
 process.setSourceMapsEnabled = () => {};
-lazyProperty('report', () => ({ getReport: () => ({}) }));
+// (its header's glibc versions are what packages read to pick a prebuilt addon for the C library,
+// as better-sqlite3 and detect-libc do: absent with another libc, as in Node.js)
+lazyProperty('report', () => ({
+  getReport() {
+    const header = { nodejsVersion: VERSION, arch: info.arch, platform: info.platform };
+    if (info.glibcVersionRuntime !== undefined) {
+      header.glibcVersionRuntime = info.glibcVersionRuntime;
+      header.glibcVersionCompiler = info.glibcVersionCompiler;
+    }
+    return { header };
+  },
+}));
 
 // EventEmitter: process becomes one (events loads) when first used as one
 const emitterMethods = [

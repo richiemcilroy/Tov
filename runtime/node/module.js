@@ -110,7 +110,12 @@ function createRequire(filename) {
   require.resolve = function resolve(spec) {
     if (isBuiltin(spec)) return spec;
     const id = resolveId(spec, dir);
-    if (id === undefined) throw notFound(spec, from);
+    if (id === undefined) {
+      // not in the bundle: a file on disk where the program runs (a package's .wasm, .so, data)
+      const found = registry()?.resolveFrom?.(spec.startsWith('file://') ? decodeURIComponent(spec.slice(7)) : spec, from);
+      if (found !== undefined) return found;
+      throw notFound(spec, from);
+    }
     return registry().names[id];
   };
   require.resolve.paths = (spec) => (isBuiltin(spec) ? null : Module._nodeModulePaths(dir));
