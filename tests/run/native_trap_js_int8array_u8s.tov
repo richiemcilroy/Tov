@@ -1,0 +1,9 @@
+// Only a Uint8Array, Uint8ClampedArray or ArrayBuffer is taken byte by byte: an Int8Array isn't a u8[].
+import { runInThisContext } from "node:vm"
+
+function main() {
+  const a = try runInThisContext("new Int8Array([1, -1])")
+  console.log(a.length as int)
+  const bytes = a as u8[]
+  console.log(bytes.length)
+}

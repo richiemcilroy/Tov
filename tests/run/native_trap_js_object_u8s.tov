@@ -1,0 +1,8 @@
+// A JavaScript object that isn't a Uint8Array, Buffer or ArrayBuffer still isn't a u8[].
+import { constants } from "node:buffer"
+
+function main() {
+  console.log("before")
+  const bytes = constants as u8[]
+  console.log(bytes.length)
+}

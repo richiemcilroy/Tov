@@ -1,0 +1,25 @@
+// Casting a Uint8Array, Node Buffer or ArrayBuffer to u8[] copies its bytes.
+import { uint8, clamped, arrayBuffer, view, empty, emptyBuffer, numbers } from "js-bytes"
+import { Buffer } from "node:buffer"
+
+function main() {
+  const a = try uint8()
+  const bytes = a as u8[]
+  console.log(bytes.length, bytes[0], bytes[1], bytes[2])
+  // a copy: changing it leaves the JavaScript array alone
+  bytes[0] = 9
+  console.log(bytes[0], a[0] as int)
+  console.log((try clamped() as u8[]).join(","))
+  // Node Buffer (a Uint8Array)
+  const buf = try Buffer.from("tov")
+  console.log((buf as u8[]).join(","))
+  console.log((try buf.subarray(1) as u8[]).join(","))
+  // ArrayBuffer
+  console.log((try arrayBuffer() as u8[]).join(","))
+  // a view with a byte offset: only its own bytes
+  console.log((try view() as u8[]).join(","))
+  // empty ones
+  console.log((try empty() as u8[]).length, (try emptyBuffer() as u8[]).length)
+  // a JavaScript array of numbers, as before
+  console.log((try numbers() as u8[]).join(","))
+}

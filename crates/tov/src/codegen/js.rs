@@ -309,6 +309,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let d = self.desc(e);
                 let conv = self.js_from_stmt(e, "x", "w[i]");
                 let rel = self.release_code(t, "a");
+                if self.tget(e) == Ty::U8 {
+                    // a Uint8Array, Buffer or ArrayBuffer: its bytes, copied
+                    let _ = writeln!(b, "    if (tv_js_as_u8s(v, out)) return true;");
+                }
                 let _ = writeln!(b, "    if (!tv_js_is_array(v)) return false;");
                 let _ = writeln!(b, "    uint32_t n = tv_js_length(v); tv_arr a = TV_EMPTY_ARR;");
                 let _ = writeln!(b, "    {ect} *w = ({ect} *)tv_arr_reserve_tail(&a, {d}, n);");

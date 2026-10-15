@@ -247,6 +247,9 @@ JSObjectRef tv_js_bytes(void *ptr, size_t len, void (*dealloc)(void *bytes, void
 JSObjectRef tv_js_bytes_copy(const void *ptr, size_t len);
 /* The bytes of a typed array, ArrayBuffer or DataView (valid until JavaScript next runs). */
 bool tv_js_bytes_view(JSValueRef v, uint8_t **ptr, size_t *len);
+/* A copy of the bytes of a Uint8Array (a Buffer too), Uint8ClampedArray or ArrayBuffer as a
+ * `u8[]`; false for anything else. */
+bool tv_js_as_u8s(JSValueRef v, tv_arr *out);
 
 /* ------------------------------------------------------------------ promises */
 

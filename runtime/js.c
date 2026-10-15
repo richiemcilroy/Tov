@@ -1418,6 +1418,23 @@ bool tv_js_bytes_view(JSValueRef v, uint8_t **ptr, size_t *len) {
     return true;
 }
 
+bool tv_js_as_u8s(JSValueRef v, tv_arr *out) {
+    JSContextRef ctx = tv_js();
+    if (!JSValueIsObject(ctx, v)) return false;
+    JSTypedArrayType t = JSValueGetTypedArrayType(ctx, v, NULL);
+    if (t != kJSTypedArrayTypeUint8Array && t != kJSTypedArrayTypeUint8ClampedArray && t != kJSTypedArrayTypeArrayBuffer) return false;
+    uint8_t *p;
+    size_t len;
+    if (!tv_js_bytes_view(v, &p, &len)) return false;
+    tv_arr a = TV_EMPTY_ARR;
+    if (len) {
+        memcpy(tv_arr_reserve_tail(&a, &tv_type_u8, (tv_int)len), p, len);
+        a.len = (tv_int)len;
+    }
+    *out = a;
+    return true;
+}
+
 /* ------------------------------------------------------------------ promises */
 
 struct tv_js_deferred {
