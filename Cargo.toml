@@ -5,6 +5,7 @@ members = ["crates/tov"]
 [workspace.package]
 edition = "2024"
 license = "MIT"
+rust-version = "1.95"
 
 [profile.release]
 debug = "line-tables-only"

@@ -99,7 +99,7 @@ test("rect area", () => {
 
 ## Getting started
 
-You need Rust (to build the compiler) and a C compiler (`clang` or `gcc`).
+You need Rust 1.95 or newer (to build the compiler) and a C compiler (`clang` or `gcc`).
 
 ```sh
 git clone https://github.com/richiemcilroy/Tov
