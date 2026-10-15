@@ -2319,6 +2319,30 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.close("}");
                 return res;
             }
+            (Ty::Map(fk, fv), Ty::Map(tk, tv)) => {
+                let (fkd, fvd) = (self.desc(fk), self.desc(fv));
+                let (tkd, tvd) = (self.desc(tk), self.desc(tv));
+                let (fkct, fvct) = (self.ctype(fk), self.ctype(fv));
+                let (tkct, tvct) = (self.ctype(tk), self.ctype(tv));
+                let res = self.tmp(to, "TV_EMPTY_MAP", true);
+                let (cursor, kp, vp) = (self.fresh("i"), self.fresh("k"), self.fresh("v"));
+                self.line(format!("{fkct} *{kp} = NULL; {fvct} *{vp} = NULL;"));
+                self.open(&format!("for (tv_int {cursor} = 0; tv_map_next({}, {fkd}, {fvd}, &{cursor}, (void **)&{kp}, (void **)&{vp});) {{", v.code));
+                self.push_temps();
+                let (key, value) = (self.fresh("k"), self.fresh("v"));
+                self.line(format!("{fkct} {key} = *{kp}; {fvct} {value} = *{vp};"));
+                let (moved_key, moved_value) = (self.fresh("k"), self.fresh("v"));
+                let converted_key = self.coerce(Val::plain(key, fk), tk);
+                let key_code = self.consume(converted_key);
+                self.line(format!("{tkct} {moved_key} = {key_code};"));
+                let converted_value = self.coerce(Val::plain(value, fv), tv);
+                let value_code = self.consume(converted_value);
+                self.line(format!("{tvct} {moved_value} = {value_code};"));
+                self.line(format!("tv_map_set(&{}, {tkd}, {tvd}, &{moved_key}, &{moved_value});", res.code));
+                self.pop_temps();
+                self.close("}");
+                return res;
+            }
             // A promise with a narrower error type (or a value of the same representation) is the
             // same promise.
             (Ty::Promise(fv, _), Ty::Promise(tv, _)) if fv == tv || self.ctype(fv) == self.ctype(tv) => {

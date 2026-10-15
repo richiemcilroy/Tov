@@ -10,6 +10,7 @@ fig,kiwi,apple,pear
 Map(4) { 'apple' => 10, 'fig' => 12, 'kiwi' => 5, 'pear' => 1 } 4 true undefined
 apple,fig,kiwi,pear 10,12,5,1
 apple:10 fig:12 kiwi:5 pear:1
+Map(2) { 'apple' => 'fruit', 'fig' => 'fruit' } fruit undefined
 Set(3) { 3, 1, 2 } 3 true false
 6 3,1,2
 []  [ undefined, 1 ] { a: 1, b: 'x', c: [ true ] }

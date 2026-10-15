@@ -1,5 +1,9 @@
 type Item = { name: string, qty: int, price: f64 }
 
+function widenLabels(labels: Map<string, string>): Map<string, string | undefined> {
+  return labels
+}
+
 function main() {
   const items: Item[] = [
     { name: "apple", qty: 3, price: 0.5 },
@@ -37,6 +41,13 @@ function main() {
     lines.push(`${name}:${qty}`)
   })
   console.log(lines.join(" "))
+
+  const labels = new Map<string, string>()
+  labels.set("apple", "fruit")
+  labels.set("fig", "fruit")
+  const wideLabels = widenLabels(labels)
+  labels.set("apple", "changed")
+  console.log(wideLabels, wideLabels.get("apple"), wideLabels.get("missing"))
 
   const seen = new Set<int>()
   for (const n of [3, 1, 3, 2, 1]) seen.add(n)
