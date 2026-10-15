@@ -1,0 +1,19 @@
+// Every single-character escape JavaScript has, plus the hex, unicode and
+// line-continuation forms, printed as UTF-8 bytes.
+function bytes(s: string): string {
+  const out: string[] = []
+  for (const b of new TextEncoder().encode(s)) out.push(`${b}`)
+  return out.join(" ")
+}
+
+function main() {
+  console.log("b f v", bytes("\b"), bytes("\f"), bytes("\v"))
+  console.log("n r t 0", bytes("\n"), bytes("\r"), bytes("\t"), bytes("\0"))
+  console.log("quotes", bytes("\\"), bytes("\'"), bytes("\""), bytes(`\``), bytes(`\$`))
+  console.log("hex", bytes("\x1b"), bytes("\x7f"), bytes("\x07"))
+  console.log("unicode", bytes("\u001b"), bytes("\u{1b}"), bytes("\u009b"), bytes("\u{1F600}"))
+  console.log("identity", bytes("\a"), bytes("\q"))
+  console.log("template", bytes(`\b\f\v`))
+  console.log("continuation", bytes("a\
+b"))
+}
