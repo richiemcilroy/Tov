@@ -345,11 +345,7 @@ fn execute(f: Flags, cmd: BuildCmd) -> ExitCode {
     }
     match cmd {
         BuildCmd::Build => {
-            // (a new file, renamed over the old one: macOS kills a signed binary rewritten in place,
-            // since it keeps the old file's signature)
-            let tmp = dest.with_file_name(format!(".{}.tmp{}", dest.file_name().map_or("tov".into(), |n| n.to_string_lossy()), std::process::id()));
-            if let Err(e) = std::fs::copy(&built.binary, &tmp).and_then(|_| std::fs::rename(&tmp, &dest)) {
-                let _ = std::fs::remove_file(&tmp);
+            if let Err(e) = tov::build::install(&built, &dest) {
                 eprintln!("error: can't write {}: {e}", dest.display());
                 return ExitCode::from(2);
             }

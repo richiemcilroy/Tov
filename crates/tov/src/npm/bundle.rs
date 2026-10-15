@@ -26,6 +26,9 @@ pub struct Bundle {
     pub warnings: Vec<String>,
     /// It holds a Node-API addon (`.node`): the program links runtime/napi.c.
     pub native: bool,
+    /// The Node-API addons it bundles. The program loads each from its own directory, by file
+    /// name, so it ships with them beside it (`build::install` puts them there).
+    pub addons: Vec<PathBuf>,
 }
 
 struct Module {
@@ -48,6 +51,7 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
     let mut warnings = Vec::new();
     let mut entry_ids = Vec::new();
     let mut native = false;
+    let mut addons: Vec<PathBuf> = Vec::new();
     let mut pack = Pack::load(root, specs);
     // Node's globals (`process`, `Buffer`, ...) as a module that runs before the entries
     let globals_id = super::node_shims::shim("__globals").map(|_| add(&mut modules, &mut index, &mut queue, Target::Builtin("internal/bootstrap/globals".into())));
@@ -97,7 +101,18 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
                                 native |= addon;
                                 let msg = format!("Cannot load {name}: binary modules other than Node-API addons aren't supported by Tov");
                                 let fail = format!("var e = new Error({}); e.code = \"ERR_DLOPEN_FAILED\"; throw e;", js_string(&msg));
-                                let body = if addon { format!("if (typeof __tov_dlopen !== \"function\") {{ {fail} }} module.exports = __tov_dlopen({}, module.exports);", js_string(&name)) } else { fail };
+                                let body = if addon {
+                                    // (beside the program, not at its build path: a moved program
+                                    // never loads a stale addon from the old tree)
+                                    let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                                    if let Some(other) = addons.iter().find(|a| a.file_name() == path.file_name()) {
+                                        return Err(format!("two Node-API addons named {file} ({} and {}): the program loads each from its own directory by file name", display(other, root), name));
+                                    }
+                                    addons.push(path.to_path_buf());
+                                    format!("if (typeof __tov_dlopen !== \"function\") {{ {fail} }} var dir = process.execPath; module.exports = __tov_dlopen(dir.slice(0, dir.lastIndexOf(\"/\") + 1) + {}, module.exports);", js_string(&file))
+                                } else {
+                                    fail
+                                };
                                 modules[id].name = name;
                                 modules[id].body = body;
                                 continue;
@@ -236,7 +251,7 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
         let _ = writeln!(js, "__tov_load({id});");
     }
     js.push_str(RUNTIME_TAIL);
-    Ok(Bundle { prelude: js, sources, maps, entries: specs.to_vec(), modules: modules.len(), warnings, native })
+    Ok(Bundle { prelude: js, sources, maps, entries: specs.to_vec(), modules: modules.len(), warnings, native, addons })
 }
 
 impl Bundle {

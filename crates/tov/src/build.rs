@@ -36,6 +36,8 @@ pub enum BuildError {
 
 pub struct Built {
     pub binary: PathBuf,
+    /// The Node-API addons it loads from its own directory, beside `binary` (see `install`).
+    pub addons: Vec<PathBuf>,
     /// It links TLS (the program calls fetch()).
     pub tls: bool,
     pub cached: bool,
@@ -255,6 +257,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     drop(checker);
     let codegen::Program { c: mut c_src, mut uses_tls, npm } = program;
     let mut native = false;
+    let mut addons: Vec<PathBuf> = Vec::new();
     // The blob, when it's appended to the binary rather than assembled into it (see with_blob)
     let mut appended_blob: Option<PathBuf> = None;
     // npm packages: bundled into a blob the program embeds (see runtime/js.c)
@@ -283,6 +286,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
             std::fs::write(&tmp, &blob).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| BuildError::Message(format!("can't write {}: {e}", path.display())))?;
         }
         native = b.native;
+        addons = b.addons;
         let p = path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
         if own_jsc_dir().is_some() {
             // (with Tov's own engine, appended to the binary: a build whose JavaScript changed
@@ -343,16 +347,28 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     // Link flags (see below) are part of what a cached binary was built with.
     let tls_key = tls.as_ref().map(|t| t.key.clone()).unwrap_or_default();
     let lld = use_lld(&cc);
-    let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), LINK_FLAGS.as_bytes(), if lld { b"lld" } else { b"ld" }, tls_key.as_bytes(), js_key.as_bytes()]);
+    // (the addons' bytes too: a rebuilt addon gives a new key, so the one beside a cached binary is current)
+    let mut addon_bytes = Vec::new();
+    for a in &addons {
+        addon_bytes.push(std::fs::read(a).map_err(|e| BuildError::Message(format!("can't read {}: {e}", a.display())))?);
+    }
+    let addon_key = hash_hex(&addon_bytes.iter().map(|b| b.as_slice()).collect::<Vec<_>>());
+    let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), LINK_FLAGS.as_bytes(), if lld { b"lld" } else { b"ld" }, tls_key.as_bytes(), js_key.as_bytes(), addon_key.as_bytes()]);
     let dir = cache_dir();
-    let bin_dir = dir.join("bin");
+    // A program with addons gets a directory of its own, the addons beside it.
+    let bin_dir = if addons.is_empty() { dir.join("bin") } else { dir.join("bin").join(&key) };
     let binary = bin_dir.join(&key);
+    let addons: Vec<PathBuf> = addons.iter().map(|a| bin_dir.join(a.file_name().unwrap_or_default())).collect();
     if cached(&binary) {
+        if !addons.is_empty() {
+            // (the cache is pruned by modification time)
+            let _ = std::fs::File::open(&bin_dir).and_then(|f| f.set_modified(SystemTime::now()));
+        }
         let binary = match &appended_blob {
             Some(blob) => with_blob(&binary, blob)?,
             None => binary,
         };
-        return Ok(Built { binary, tls: uses_tls, cached: true, sources, timings: (t1 - t0, t2 - t1, Duration::ZERO) });
+        return Ok(Built { binary, addons, tls: uses_tls, cached: true, sources, timings: (t1 - t0, t2 - t1, Duration::ZERO) });
     }
     let c_dir = dir.join("c");
     for d in [&bin_dir, &c_dir] {
@@ -489,13 +505,17 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     if jsc.as_ref().is_some_and(|j| !j.own) && cfg!(target_vendor = "apple") {
         sign_for_jit(&tmp, &c_dir)?;
     }
+    // (the addons first: a binary in the cache has them beside it)
+    for (bytes, to) in addon_bytes.iter().zip(&addons) {
+        write_new(to, |t| std::fs::write(t, bytes)).map_err(|e| BuildError::Message(format!("can't write {}: {e}", to.display())))?;
+    }
     std::fs::rename(&tmp, &binary).map_err(|e| BuildError::Message(format!("can't move the binary into the cache: {e}")))?;
     let binary = match &appended_blob {
         Some(blob) => with_blob(&binary, blob)?,
         None => binary,
     };
     let t3 = Instant::now();
-    Ok(Built { binary, tls: uses_tls, cached: false, sources, timings: (t1 - t0, t2 - t1, t3 - t2) })
+    Ok(Built { binary, addons, tls: uses_tls, cached: false, sources, timings: (t1 - t0, t2 - t1, t3 - t2) })
 }
 
 /// The compiler flags without the precompiled header's `-include` (for other C files).
@@ -645,6 +665,30 @@ fn with_blob(base: &Path, blob: &Path) -> Result<PathBuf, BuildError> {
         }
     }
     Ok(out)
+}
+
+/// Writes `to` through a new file renamed over it: macOS kills a signed binary (or one whose
+/// addon is) rewritten in place, since it keeps the old file's signature.
+fn write_new(to: &Path, write: impl FnOnce(&Path) -> std::io::Result<()>) -> std::io::Result<()> {
+    let name = to.file_name().map_or("tov".into(), |n| n.to_string_lossy().into_owned());
+    let tmp = to.with_file_name(format!(".{name}.tmp{}", std::process::id()));
+    let done = write(&tmp).and_then(|_| std::fs::rename(&tmp, to));
+    if done.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    done
+}
+
+/// Puts a built program at `dest`, with the Node-API addons it loads beside it.
+pub fn install(built: &Built, dest: &Path) -> std::io::Result<()> {
+    let dir = dest.parent().unwrap_or(Path::new("."));
+    if let Some(a) = built.addons.iter().find(|a| a.file_name() == dest.file_name()) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("the program would replace its addon {}, which it loads from beside it", a.file_name().unwrap_or_default().to_string_lossy())));
+    }
+    for a in &built.addons {
+        write_new(&dir.join(a.file_name().unwrap_or_default()), |t| std::fs::copy(a, t).map(|_| ()))?;
+    }
+    write_new(dest, |t| std::fs::copy(&built.binary, t).map(|_| ()))
 }
 
 /// Ad-hoc signs a binary with the JIT entitlement (see JIT_ENTITLEMENTS).

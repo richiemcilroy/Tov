@@ -146,7 +146,7 @@ fn start(paths: &[PathBuf], base: &Path, build: &tov::build::Options, args: &[St
         }
     };
     if let Then::Build(dest) = then {
-        match std::fs::copy(&built.binary, dest) {
+        match tov::build::install(&built, dest) {
             Ok(_) => println!("build: {}", dest.display()),
             Err(e) => eprintln!("error: can't write {}: {e}", dest.display()),
         }

@@ -70,6 +70,9 @@ fn main() {
         if let Some(dir) = &cache {
             let _ = std::fs::remove_dir_all(dir);
         }
+        if name == "napi" {
+            failed.extend(installed_addon(&built, &expected).err());
+        }
     }
     for f in &failed {
         eprintln!("{f}\n");
@@ -78,6 +81,33 @@ fn main() {
     if !failed.is_empty() {
         std::process::exit(1);
     }
+}
+
+/// A program installed elsewhere loads its addon from beside it, never from its build path: it
+/// runs with the copy `install` put there, and fails once that copy is gone.
+fn installed_addon(built: &tov::build::Built, expected: &str) -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("tov-npm-install-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    if tov::build::install(built, &dir.join("addon.node")).is_ok() {
+        return Err("napi: installed as addon.node, it replaced its own addon".into());
+    }
+    let dest = dir.join("napi");
+    tov::build::install(built, &dest).map_err(|e| format!("napi: can't install: {e}"))?;
+    let addon = dir.join("addon.node");
+    let first = Command::new(&dest).output().expect("run the installed program");
+    std::fs::remove_file(&addon).map_err(|e| format!("napi: the addon wasn't installed beside the program: {e}"))?;
+    let second = Command::new(&dest).output().expect("run the installed program");
+    let _ = std::fs::remove_dir_all(&dir);
+    let actual = String::from_utf8_lossy(&first.stdout);
+    if actual != expected || !first.status.success() {
+        return Err(format!("napi installed: output differs (exit {:?})\n{actual}{}", first.status.code(), String::from_utf8_lossy(&first.stderr)));
+    }
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    if second.status.success() || !stderr.contains(&*addon.to_string_lossy()) {
+        return Err(format!("napi installed: without its addon beside it, it should fail naming {} (exit {:?})\n{stderr}", addon.display(), second.status.code()));
+    }
+    Ok(())
 }
 
 /// Waits for the process a program starts as it exits to finish writing its bytecode cache (the
