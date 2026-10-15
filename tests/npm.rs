@@ -56,9 +56,9 @@ fn main() {
         let cache = (name == "cache" && (cfg!(target_vendor = "apple") || std::env::var_os("TOV_JSC_DIR").is_some())).then(|| std::env::temp_dir().join(format!("tov-npm-cache-{}", std::process::id())));
         let runs = if cache.is_some() { 2 } else { 1 };
         for run in 0..runs {
-            let mut cmd = if name == "node_tty_pty" {
+            let mut cmd = if name == "node_tty_pty" || name == "node_tty_reset" {
                 let mut cmd = Command::new("python3");
-                cmd.arg(dir.join("tty_pty.py")).arg(&built.binary);
+                cmd.arg(dir.join(if name == "node_tty_pty" { "tty_pty.py" } else { "tty_reset.py" })).arg(&built.binary);
                 cmd
             } else {
                 Command::new(&built.binary)

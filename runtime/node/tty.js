@@ -43,6 +43,14 @@ class WriteStream extends Writable {
     return [this.columns, this.rows];
   }
 
+  // Tov's own: `sequence` is written to this terminal however the program ends (exit, an
+  // uncaught error, a trap, a fatal signal in raw mode), once; '' clears it. For a program
+  // that changes the terminal's state, such as entering the alternate screen.
+  setResetOnExit(sequence) {
+    const err = native.setResetOnExit(this.fd, String(sequence));
+    if (err < 0) throw new Error(`setResetOnExit: ${err === -25 ? 'not a terminal' : `error ${-err}`}`);
+  }
+
   getColorDepth(env) {
     return getColorDepth(env);
   }

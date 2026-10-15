@@ -878,6 +878,72 @@ NATIVE(n_os_parallelism) {
 
 #include "node_tty.h"
 
+/* The bytes a program asked to be written to its terminal however it ends (say, leaving the
+ * alternate screen): at exit after the last of stdout, on a trap before its message, and on a
+ * fatal SIGINT/SIGTERM while raw mode is on. Set with setResetOnExit(fd, string) on a terminal
+ * fd (a copy of it is kept, so closing the stream does not lose it), cleared with "". Written
+ * once; the signal handler reads it, so updates block those signals. */
+static int tv_node_reset_fd = -1;
+static char *tv_node_reset;
+static size_t tv_node_reset_len;
+
+static void tv_node_reset_write(void) { /* async-signal-safe */
+    int fd = tv_node_reset_fd;
+    if (fd < 0) return;
+    tv_node_reset_fd = -1;
+    const char *s = tv_node_reset;
+    size_t len = tv_node_reset_len;
+    while (len) {
+        ssize_t w = write(fd, s, len);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return;
+        }
+        s += w;
+        len -= (size_t)w;
+    }
+}
+
+static void tv_node_reset_at_exit(void) {
+    tv_out_flush();
+    tv_node_reset_write();
+}
+
+NATIVE(n_set_reset_on_exit) {
+    UNUSED;
+    int fd = (int)arg_num(ctx, n, a, 0, -1);
+    char *text = arg_cstr(ctx, n, a, 1);
+    if (!text) return num(ctx, -EINVAL);
+    int copy = -1;
+    if (*text) {
+        if (fd < 0 || !isatty(fd)) { free(text); return num(ctx, -ENOTTY); }
+        copy = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+        if (copy < 0) { int err = errno; free(text); return num(ctx, -err); }
+    } else {
+        free(text);
+        text = NULL;
+    }
+    sigset_t before;
+    tv_node_tty_block_signals(&before);
+    int old_fd = tv_node_reset_fd;
+    char *old = tv_node_reset;
+    tv_node_reset_fd = -1;
+    tv_node_reset = text;
+    tv_node_reset_len = text ? strlen(text) : 0;
+    tv_node_reset_fd = copy;
+    sigprocmask(SIG_SETMASK, &before, NULL);
+    if (old_fd >= 0) close(old_fd);
+    free(old);
+    static bool registered;
+    if (copy >= 0 && !registered) {
+        atexit(tv_node_reset_at_exit);
+        tv_trap_cleanup = tv_node_reset_write;
+        registered = true;
+    }
+    return num(ctx, 0);
+}
+
+
 static bool tv_node_tty_master(int fd) {
 #ifdef TIOCGPTN
     unsigned int index;
@@ -2334,6 +2400,7 @@ static void tv_node_sig_caught(int sig) {
         if (!pthread_equal(pthread_self(), tv_node_sig_thread)) {
             pthread_kill(tv_node_sig_thread, sig);
         } else {
+            tv_node_reset_write();
             tv_node_tty_reset();
             struct sigaction sa = {0};
             sa.sa_handler = SIG_DFL;
@@ -4286,6 +4353,7 @@ void tv_node_install(JSContextRef ctx, JSObjectRef native) {
     tv_js_def(ctx, native, "isatty", n_isatty);
     tv_js_def(ctx, native, "guessHandleType", n_guess_handle_type);
     tv_js_def(ctx, native, "windowSize", n_window_size);
+    tv_js_def(ctx, native, "setResetOnExit", n_set_reset_on_exit);
     tv_js_def(ctx, native, "memoryUsage", n_memory_usage);
     tv_js_def(ctx, native, "cpuUsage", n_cpu_usage);
     tv_js_def(ctx, native, "ids", n_ids);

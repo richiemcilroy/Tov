@@ -32,6 +32,9 @@ typedef int64_t tv_int;
 /* ------------------------------------------------------------------ traps */
 
 _Noreturn void tv_trap(const char *msg, const char *loc);
+/* Run by tv_trap after flushing stdout, before printing the trap (NULL: nothing): the node
+ * runtime writes the program's terminal reset there (tty.WriteStream's setResetOnExit). */
+extern void (*tv_trap_cleanup)(void);
 void *tv_alloc(size_t size);          /* traps on out-of-memory */
 void tv_write_fd(int fd, const char *s, size_t n); /* all of s to fd 1 or 2, unbuffered */
 void tv_err_cstr(const char *s);                     /* to stderr */

@@ -1,0 +1,9 @@
+import run from "node-tty-reset"
+
+function main() {
+  const trap = try run() as bool
+  if (trap) {
+    const none: int[] = []
+    console.log(`${none[0]!}`)
+  }
+}
