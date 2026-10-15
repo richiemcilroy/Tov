@@ -1,0 +1,27 @@
+// A recursive union of named record aliases: the members that mention the union are held
+// boxed, and narrowing to one of them unboxes it.
+type Leaf = { kind: "leaf", pane: int }
+type Split = { kind: "split", sideBySide: bool, a: Layout, b: Layout }
+type Layout = Leaf | Split
+
+function count(l: Layout): int {
+  if (l.kind === "leaf") return 1
+  return count(l.a) + count(l.b)
+}
+
+function panes(l: Layout): string {
+  if (l.kind === "leaf") return `${l.pane}`
+  return `(${panes(l.a)}${l.sideBySide ? "|" : "/"}${panes(l.b)})`
+}
+
+const t: Layout = { kind: "split", sideBySide: true, a: { kind: "leaf", pane: 1 }, b: { kind: "split", sideBySide: false, a: { kind: "leaf", pane: 2 }, b: { kind: "leaf", pane: 3 } } }
+console.log(count(t), panes(t))
+
+// A narrowed member rebuilt with a new part.
+function withFirst(l: Layout, first: Layout): Layout {
+  if (l.kind === "leaf") return l
+  return { kind: "split", sideBySide: !l.sideBySide, a: first, b: l.b }
+}
+console.log(panes(withFirst(t, { kind: "leaf", pane: 9 })), panes(t))
+const s: Split = { kind: "split", sideBySide: true, a: t, b: { kind: "leaf", pane: 4 } }
+console.log(count(s), panes(s))

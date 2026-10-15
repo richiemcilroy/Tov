@@ -2157,6 +2157,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 return Val { code: self.u_payload(&v.code, v.ty, k), ty: to, owned: false };
             }
+            // Narrowed to a member the union holds boxed, as a recursive alias (`Split` in
+            // `type Layout = Leaf | Split` when `Split` mentions `Layout`): unbox it.
+            if let Some((k, m)) = self.boxed_member(v.ty, to) {
+                let payload = Val { code: self.u_payload(&v.code, v.ty, k), ty: m, owned: false };
+                return self.unfold_val(payload);
+            }
             // Narrowed to a smaller union: re-tag (members outside the target can't occur here).
             if let Ty::Union(fms) = self.tget(v.ty)
                 && let Ty::Union(_) = self.tget(to)
@@ -3268,7 +3274,20 @@ impl<'c, 'a> Gen<'c, 'a> {
         if let Some(k) = self.tag_of(p.ty, to) {
             return Place { lv: self.u_payload(&p.lv, p.ty, k), ty: to, weak: false };
         }
+        if let Some((k, m)) = self.boxed_member(p.ty, to) {
+            let boxed = Place { lv: self.u_payload(&p.lv, p.ty, k), ty: m, weak: false };
+            return self.project_place(boxed, to);
+        }
         p
+    }
+
+    /// The member of union `union` that is a recursive alias unfolding to `to`, with its tag.
+    fn boxed_member(&mut self, union: TyId, to: TyId) -> Option<(usize, TyId)> {
+        if !matches!(self.tget(union), Ty::Union(_)) {
+            return None;
+        }
+        let members = self.members(union);
+        members.iter().position(|&m| matches!(self.tget(m), Ty::Rec(..)) && self.c.unfold(m) == to).map(|k| (k, members[k]))
     }
 
     /// The place as an lvalue to read and write more than once: a variable as it is (its address
