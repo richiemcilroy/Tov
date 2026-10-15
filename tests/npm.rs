@@ -9,6 +9,15 @@ use std::process::Command;
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
     let dir = root.join("tests/npm");
+    // The production TTY registry, with a deterministic failing tcsetattr.
+    let tty_state = std::env::temp_dir().join(format!("tov-tty-state-{}", std::process::id()));
+    let compiled = Command::new("cc").args(["-std=c11", "-D_POSIX_C_SOURCE=200809L"])
+        .arg("-I").arg(root.join("runtime")).arg(dir.join("tty_state.c"))
+        .arg("-o").arg(&tty_state).status().expect("compile TTY state test");
+    assert!(compiled.success(), "can't compile TTY state test");
+    let checked = Command::new(&tty_state).status().expect("run TTY state test");
+    let _ = std::fs::remove_file(&tty_state);
+    assert!(checked.success(), "TTY restoration-failure regression");
     // the Node-API fixture: a C addon, compiled here (binaries aren't checked in)
     let addon = dir.join("node_modules/napi-addon");
     let built = addon.join("build/addon.node");
@@ -47,7 +56,13 @@ fn main() {
         let cache = (name == "cache" && (cfg!(target_vendor = "apple") || std::env::var_os("TOV_JSC_DIR").is_some())).then(|| std::env::temp_dir().join(format!("tov-npm-cache-{}", std::process::id())));
         let runs = if cache.is_some() { 2 } else { 1 };
         for run in 0..runs {
-            let mut cmd = Command::new(&built.binary);
+            let mut cmd = if name == "node_tty_pty" || name == "node_tty_reset" {
+                let mut cmd = Command::new("python3");
+                cmd.arg(dir.join(if name == "node_tty_pty" { "tty_pty.py" } else { "tty_reset.py" })).arg(&built.binary);
+                cmd
+            } else {
+                Command::new(&built.binary)
+            };
             if let Some(dir) = &cache {
                 if run == 0 {
                     let _ = std::fs::remove_dir_all(dir);

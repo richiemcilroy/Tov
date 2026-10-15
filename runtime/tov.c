@@ -78,6 +78,8 @@ static _Noreturn void tv_oom(size_t size) {
     exit(101);
 }
 
+void (*tv_trap_cleanup)(void);
+
 _Noreturn void tv_trap(const char *msg, const char *loc) {
     if (tv_test_jmp) {
         tv_test_msg.len = 0;
@@ -87,6 +89,7 @@ _Noreturn void tv_trap(const char *msg, const char *loc) {
         tv_test_unwind();
     }
     tv_out_flush();
+    if (tv_trap_cleanup) tv_trap_cleanup();
     tv_err_cstr("trap: ");
     tv_err_cstr(msg);
     tv_err_cstr("\n");

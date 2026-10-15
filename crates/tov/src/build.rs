@@ -23,6 +23,7 @@ mod tls_files {
 /// The JavaScript bridge and the Node.js natives: linked by programs that import npm packages.
 const JS_C: &str = include_str!("../../../runtime/js.c");
 const NODE_C: &str = include_str!("../../../runtime/node.c");
+const NODE_TTY_H: &str = include_str!("../../../runtime/node_tty.h");
 /// Node-API (native addons): linked when the bundle holds one.
 const NAPI_C: &str = include_str!("../../../runtime/napi.c");
 /// Lets JavaScriptCore compile JavaScript to machine code (without it, it only interprets: an
@@ -338,7 +339,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let jsc = if npm.is_empty() { None } else { Some(jsc_flags()?) };
     let js_key = match &jsc {
         None => String::new(),
-        Some(j) => hash_hex(&[JS_C.as_bytes(), NODE_C.as_bytes(), NAPI_C.as_bytes(), codegen::JS_H.as_bytes(), codegen::RUNTIME_H.as_bytes(), cc.as_bytes(), flag_text.as_bytes(), JIT_ENTITLEMENTS.as_bytes(), j.cflags.join(" ").as_bytes(), j.libs.join(" ").as_bytes()]),
+        Some(j) => hash_hex(&[JS_C.as_bytes(), NODE_C.as_bytes(), NODE_TTY_H.as_bytes(), NAPI_C.as_bytes(), codegen::JS_H.as_bytes(), codegen::RUNTIME_H.as_bytes(), cc.as_bytes(), flag_text.as_bytes(), JIT_ENTITLEMENTS.as_bytes(), j.cflags.join(" ").as_bytes(), j.libs.join(" ").as_bytes()]),
     };
     // Link flags (see below) are part of what a cached binary was built with.
     let tls_key = tls.as_ref().map(|t| t.key.clone()).unwrap_or_default();
@@ -508,7 +509,7 @@ fn js_objects(cc: &str, flags: &[String], c_dir: &Path, key: &str) -> Result<Vec
     let fail = |what: String| BuildError::Message(format!("can't build the JavaScript bridge: {what}"));
     let dir = c_dir.join(format!("js-{key}.tmp{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| fail(e.to_string()))?;
-    for (name, text) in [("tov.h", codegen::RUNTIME_H), ("js.h", codegen::JS_H), ("js.c", JS_C), ("node.c", NODE_C), ("napi.c", NAPI_C)] {
+    for (name, text) in [("tov.h", codegen::RUNTIME_H), ("js.h", codegen::JS_H), ("js.c", JS_C), ("node.c", NODE_C), ("node_tty.h", NODE_TTY_H), ("napi.c", NAPI_C)] {
         std::fs::write(dir.join(name), text).map_err(|e| fail(e.to_string()))?;
     }
     // (the three at once)
@@ -532,7 +533,7 @@ fn js_objects(cc: &str, flags: &[String], c_dir: &Path, key: &str) -> Result<Vec
     for r in results {
         r?;
     }
-    for name in ["tov.h", "js.h", "js.c", "node.c", "napi.c"] {
+    for name in ["tov.h", "js.h", "js.c", "node.c", "node_tty.h", "napi.c"] {
         let _ = std::fs::remove_file(dir.join(name));
     }
     let _ = std::fs::remove_dir(&dir);
