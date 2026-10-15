@@ -1893,7 +1893,7 @@ impl<'a> Parser<'a> {
             let name = self.interner.intern(self.text(t));
             let params = vec![Param { name, span: self.span_of(t), ty: None, inout: false, optional: false, prop: None, rest: false }];
             self.bump(); // =>
-            return Some(self.arrow_body(start, params, None));
+            return Some(self.arrow_body(start, params, None, None));
         }
         if self.at(Tok::Lt)
             && self.speculate(|p| {
@@ -1914,7 +1914,7 @@ impl<'a> Parser<'a> {
             Some(Tok::Arrow) => {
                 let params = self.params();
                 self.bump(); // =>
-                Some(self.arrow_body(start, params, None))
+                Some(self.arrow_body(start, params, None, None))
             }
             Some(Tok::Colon) => self.speculate(|p| {
                 let params = p.params();
@@ -1922,19 +1922,20 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 let ret = p.ty();
+                let throws = p.effects_clause();
                 if !p.eat(Tok::Arrow) {
                     return None;
                 }
-                Some(p.arrow_body(start, params, Some(ret)))
+                Some(p.arrow_body(start, params, Some(ret), throws))
             }),
             _ => None,
         }
     }
 
-    fn arrow_body(&mut self, start: Span, params: Vec<Param>, ret: Option<TypeId>) -> ExprId {
+    fn arrow_body(&mut self, start: Span, params: Vec<Param>, ret: Option<TypeId>, throws: Option<TypeId>) -> ExprId {
         let body = if self.at(Tok::LBrace) { ArrowBody::Block(self.block()) } else { ArrowBody::Expr(self.assign()) };
         let span = start.to(self.prev_span());
-        self.mk_expr(ExprKind::Arrow(Box::new(ArrowFn { params, ret, body, is_async: false })), span)
+        self.mk_expr(ExprKind::Arrow(Box::new(ArrowFn { params, ret, throws, body, is_async: false })), span)
     }
 
     fn int_value(&mut self, t: Token) -> u64 {
@@ -2180,7 +2181,7 @@ impl<'a> Parser<'a> {
         }
         let body = ArrowBody::Block(self.block());
         let span = start.to(self.prev_span());
-        let value = self.mk_expr(ExprKind::Arrow(Box::new(ArrowFn { params, ret, body, is_async })), span);
+        let value = self.mk_expr(ExprKind::Arrow(Box::new(ArrowFn { params, ret, throws: None, body, is_async })), span);
         Some(ObjField { name, name_span, value, quoted: false })
     }
 

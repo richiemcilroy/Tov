@@ -1,0 +1,5 @@
+error[T0001] arrow_throws.tov:8:19: expected `() => int`, found `() => int throws Error`
+    8 |   console.log(run((): int throws Error => {
+  context: argument `f` of `run`
+
+1 error(s)

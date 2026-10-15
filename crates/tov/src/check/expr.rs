@@ -1939,6 +1939,13 @@ impl<'a> Checker<'a> {
         };
         let exp_ret = exp_fn.as_ref().map(|(_, r)| *r).filter(|&r| r != VOID && !self.types.mentions(r, &self.infer_free));
         let ret = declared_ret.or(exp_ret);
+        // `(): T throws E => ...` declares what it throws, as a function declaration does.
+        let declared_throws = f.throws.map(|t| self.resolve_type(t, &tscope));
+        if let (Some(t), Some(te)) = (declared_throws, f.throws) {
+            let span = self.ast().ty(te).span;
+            self.check_throws_type(t, span);
+        }
+        let exp_throws = declared_throws.unwrap_or(exp_throws);
         let fcx = self.fcx.last_mut().unwrap();
         // A test's body can throw (an uncaught error fails the test); other closures only when
         // their function type says so.
@@ -2003,7 +2010,11 @@ impl<'a> Checker<'a> {
         let fcx = self.fcx.last_mut().unwrap();
         fcx.scopes.pop();
         let frame = fcx.frames.pop().unwrap();
-        let thrown = if test_body || frame.thrown.is_empty() { NEVER } else { self.types.union(&frame.thrown) };
+        let thrown = match declared_throws {
+            Some(t) => t,
+            None if test_body || frame.thrown.is_empty() => NEVER,
+            None => self.types.union(&frame.thrown),
+        };
         if is_async {
             let p = self.types.promise(body_ty, thrown);
             return self.types.func(params, p);

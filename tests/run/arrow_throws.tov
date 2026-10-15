@@ -1,0 +1,26 @@
+// An arrow function declares what it throws with its return type, as a
+// function declaration does.
+function parse(s: string): int throws Error {
+  if (s === "") throw new Error("empty")
+  return 1
+}
+
+function main() {
+  const f = (s: string): int throws Error => {
+    return try parse(s)
+  }
+  const g = (): void throws TypeError => {
+    throw new TypeError("not a number")
+  }
+  try {
+    console.log(try f("x"))
+    console.log(try f(""))
+  } catch (e) {
+    console.log(`caught: ${e.message}`)
+  }
+  try {
+    try g()
+  } catch (e) {
+    console.log(`caught: ${e.message}`)
+  }
+}

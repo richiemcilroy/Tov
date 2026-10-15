@@ -150,6 +150,8 @@ pub struct Param {
 pub struct ArrowFn {
     pub params: Vec<Param>,
     pub ret: Option<TypeId>,
+    /// `(): T throws E => ...`: declared with the return type.
+    pub throws: Option<TypeId>,
     pub body: ArrowBody,
     /// `async (x) => ...` / `async name() { }`.
     pub is_async: bool,

@@ -1,0 +1,11 @@
+// An arrow that declares `throws` is a throwing function type: it does not fit
+// a parameter whose type doesn't let it throw.
+function run(f: () => int): int {
+  return f()
+}
+
+function main() {
+  console.log(run((): int throws Error => {
+    throw new Error("no")
+  }))
+}
