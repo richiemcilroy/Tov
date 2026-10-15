@@ -118,7 +118,10 @@ module.exports = {
   previewEntries: (obj, isIterator) => (isIterator ? [[], false] : []),
   getExternalValue: () => 0n,
   constructSharedArrayBuffer: (n) => new SharedArrayBuffer(n),
-  guessHandleType: () => 'UNKNOWN',
+  // The binding returns Node's enum; internal/util exposes its string name.
+  guessHandleType: (fd) => ['TCP', 'TTY', 'UDP', 'FILE', 'PIPE', 'UNKNOWN'].indexOf(
+    Number.isInteger(fd) && fd >= 0 && fd <= 2147483647
+      ? globalThis.__tov_native?.guessHandleType?.(fd) ?? 'UNKNOWN' : 'UNKNOWN'),
   isInsideNodeModules: () => false,
   sleep(ms) {
     const sab = new Int32Array(new SharedArrayBuffer(4));

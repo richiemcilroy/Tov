@@ -378,10 +378,38 @@ NATIVE(n_isatty) {
     return JSValueMakeBoolean(ctx, isatty((int)arg_num(ctx, n, a, 0, -1)) == 1);
 }
 
+NATIVE(n_guess_handle_type) {
+    UNUSED;
+    int fd = (int)arg_num(ctx, n, a, 0, -1);
+    const char *type = "UNKNOWN";
+    struct stat st;
+    if (isatty(fd)) type = "TTY";
+    else if (fstat(fd, &st) == 0) {
+        if (S_ISREG(st.st_mode) || S_ISCHR(st.st_mode)) type = "FILE";
+        else if (S_ISFIFO(st.st_mode)) type = "PIPE";
+        else if (S_ISSOCK(st.st_mode)) {
+            struct sockaddr_storage addr;
+            socklen_t len = sizeof addr;
+            if (getsockname(fd, (struct sockaddr *)&addr, &len) == 0) {
+                if (addr.ss_family == AF_UNIX) type = "PIPE";
+                else if (addr.ss_family == AF_INET || addr.ss_family == AF_INET6) {
+                    int kind;
+                    len = sizeof kind;
+                    if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &kind, &len) == 0) {
+                        if (kind == SOCK_STREAM) type = "TCP";
+                        else if (kind == SOCK_DGRAM) type = "UDP";
+                    }
+                }
+            }
+        }
+    }
+    return str(ctx, type);
+}
+
 NATIVE(n_window_size) {
     UNUSED;
     struct winsize ws;
-    if (ioctl((int)arg_num(ctx, n, a, 0, 1), TIOCGWINSZ, &ws) != 0 || ws.ws_col == 0) return undef(ctx);
+    if (ioctl((int)arg_num(ctx, n, a, 0, 1), TIOCGWINSZ, &ws) != 0) return undef(ctx);
     JSValueRef items[2] = {num(ctx, ws.ws_col), num(ctx, ws.ws_row)};
     return array(ctx, 2, items);
 }
@@ -872,29 +900,18 @@ NATIVE(n_os_parallelism) {
 
 /* ------------------------------------------------------------------ tty */
 
-NATIVE(n_set_raw_mode) {
-    UNUSED;
-    static struct termios saved;
-    static bool have_saved;
-    int fd = (int)arg_num(ctx, n, a, 0, 0);
-    bool raw = n > 1 && JSValueToBoolean(ctx, a[1]);
-    struct termios t;
-    if (tcgetattr(fd, &t) != 0) return num(ctx, -errno);
-    if (raw) {
-        if (!have_saved) {
-            saved = t;
-            have_saved = true;
-        }
-        t.c_iflag &= (tcflag_t) ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-        t.c_oflag |= ONLCR;
-        t.c_cflag |= CS8;
-        t.c_lflag &= (tcflag_t) ~(ECHO | ICANON | IEXTEN | ISIG);
-        t.c_cc[VMIN] = 1;
-        t.c_cc[VTIME] = 0;
-    } else if (have_saved) {
-        t = saved;
-    }
-    return num(ctx, tcsetattr(fd, TCSADRAIN, &t) == 0 ? 0 : -errno);
+#include "node_tty.h"
+
+static bool tv_node_tty_master(int fd) {
+#ifdef TIOCGPTN
+    unsigned int index;
+    if (ioctl(fd, TIOCGPTN, &index) == 0) return true;
+#endif
+#ifdef TIOCPTYGNAME
+    char path[128];
+    if (ioctl(fd, TIOCPTYGNAME, path) == 0) return true;
+#endif
+    return false;
 }
 
 /* ------------------------------------------------------------------ fs (synchronous; the JS binding
@@ -1750,6 +1767,7 @@ static void tv_node_work_ready(tv_io *h, bool readable, bool writable, bool brok
         JSObjectRef cb = job->callback;
         if (job->free) job->free(job);
         free(job);
+        if (!cb) continue;
         JSValueRef exc = NULL;
         JSObjectCallAsFunction(tv_js_ctx, cb, NULL, nargs, args, &exc);
         JSValueUnprotect(tv_js_ctx, cb);
@@ -2323,14 +2341,46 @@ static const char *tv_node_signal_name(int sig) {
 static int tv_node_sig_pipe[2] = {-1, -1};
 static tv_io tv_node_sig_io;
 static JSObjectRef tv_node_sig_fn;
-static bool tv_node_sig_on[NSIG];
+static volatile sig_atomic_t tv_node_sig_on[NSIG];
+static volatile sig_atomic_t tv_node_sig_default[NSIG];
+static volatile sig_atomic_t tv_node_sig_terminate[NSIG];
+static pthread_t tv_node_sig_thread;
+static struct sigaction tv_node_sig_default_before[NSIG];
 static struct sigaction tv_node_sig_before[NSIG];   /* what each watched signal did before */
 
 static void tv_node_sig_caught(int sig) {
     int saved = errno;
+    /* Default termination cannot wait for a busy JS loop or a full self-pipe.
+       Capture it at delivery and route it to the runtime thread, whose registry
+       updates block INT/TERM. tcsetattr, sigaction and raise are signal-safe. */
+    if (!tv_node_sig_on[sig] && tv_node_sig_default[sig]) tv_node_sig_terminate[sig] = 1;
+    if (tv_node_sig_terminate[sig]) {
+        if (!pthread_equal(pthread_self(), tv_node_sig_thread)) {
+            pthread_kill(tv_node_sig_thread, sig);
+        } else {
+            tv_node_tty_reset();
+            struct sigaction sa = {0};
+            sa.sa_handler = SIG_DFL;
+            sigemptyset(&sa.sa_mask);
+            sigaction(sig, &sa, NULL);
+            raise(sig);
+        }
+        errno = saved;
+        return;
+    }
     unsigned char b = (unsigned char)sig;
     (void)!write(tv_node_sig_pipe[1], &b, 1);
     errno = saved;
+}
+
+static struct sigaction tv_node_signal_action(void) {
+    struct sigaction sa = {0};
+    sa.sa_handler = tv_node_sig_caught;
+    sa.sa_flags = SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaddset(&sa.sa_mask, SIGINT);
+    sigaddset(&sa.sa_mask, SIGTERM);
+    return sa;
 }
 
 static void tv_node_sig_ready(tv_io *h, bool readable, bool writable, bool broken) {
@@ -2347,6 +2397,63 @@ static void tv_node_sig_ready(tv_io *h, bool readable, bool writable, bool broke
             JSObjectCallAsFunction(tv_js_ctx, tv_node_sig_fn, NULL, 2, args, &exc);
             if (exc) tv_node_report(exc);
         }
+    }
+}
+
+static int tv_node_signal_setup(void) {
+    if (tv_node_sig_pipe[0] >= 0) return 0;
+    if (pipe(tv_node_sig_pipe) != 0) return -errno;
+    for (int i = 0; i < 2; i++) {
+        fcntl(tv_node_sig_pipe[i], F_SETFL, fcntl(tv_node_sig_pipe[i], F_GETFL) | O_NONBLOCK);
+        fcntl(tv_node_sig_pipe[i], F_SETFD, FD_CLOEXEC);
+    }
+    tv_node_sig_io.ready = tv_node_sig_ready;
+    tv_io_add(tv_node_sig_pipe[0], &tv_node_sig_io, true, false);
+    return 0;
+}
+
+static int tv_node_signal_defaults(void) {
+    if (!tv_node_tty_modes) return 0;
+    int err = tv_node_signal_setup();
+    if (err) return err;
+    const int signals[] = { SIGINT, SIGTERM };
+    for (size_t i = 0; i < sizeof signals / sizeof *signals; i++) {
+        int sig = signals[i];
+        if (tv_node_sig_default[sig]) continue;
+        if (tv_node_sig_on[sig]) {
+            if (tv_node_sig_before[sig].sa_handler == SIG_DFL) {
+                tv_node_sig_default_before[sig] = tv_node_sig_before[sig];
+                tv_node_sig_before[sig] = tv_node_signal_action();
+                tv_node_sig_default[sig] = true;
+            }
+            continue;
+        }
+        struct sigaction before;
+        if (sigaction(sig, NULL, &before) != 0) return -errno;
+        /* Keep inherited ignored/custom dispositions and explicit listeners. */
+        if (before.sa_handler != SIG_DFL) continue;
+        struct sigaction sa = tv_node_signal_action();
+        if (sigaction(sig, &sa, NULL) != 0) return -errno;
+        tv_node_sig_default_before[sig] = before;
+        tv_node_sig_default[sig] = true;
+    }
+    return 0;
+}
+
+static void tv_node_signal_defaults_stop(void) {
+    const int signals[] = { SIGINT, SIGTERM };
+    for (size_t i = 0; i < sizeof signals / sizeof *signals; i++) {
+        int sig = signals[i];
+        if (!tv_node_sig_default[sig]) continue;
+        if (tv_node_sig_on[sig]) {
+            tv_node_sig_before[sig] = tv_node_sig_default_before[sig];
+        } else {
+            struct sigaction current;
+            if (sigaction(sig, NULL, &current) == 0 && current.sa_handler == tv_node_sig_caught) {
+                sigaction(sig, &tv_node_sig_default_before[sig], NULL);
+            }
+        }
+        tv_node_sig_default[sig] = false;
     }
 }
 
@@ -2370,26 +2477,24 @@ NATIVE(n_signal) {
     free(name);
     if (sig <= 0 || sig >= NSIG || sig == SIGKILL || sig == SIGSTOP) return num(ctx, -EINVAL);
     if (on == tv_node_sig_on[sig]) return num(ctx, 0);
+    sigset_t before;
+    tv_node_tty_block_signals(&before);
     if (on) {
-        if (tv_node_sig_pipe[0] < 0) {
-            if (pipe(tv_node_sig_pipe) != 0) return num(ctx, -errno);
-            for (int i = 0; i < 2; i++) {
-                fcntl(tv_node_sig_pipe[i], F_SETFL, fcntl(tv_node_sig_pipe[i], F_GETFL) | O_NONBLOCK);
-                fcntl(tv_node_sig_pipe[i], F_SETFD, FD_CLOEXEC);
-            }
-            tv_node_sig_io.ready = tv_node_sig_ready;
-            tv_io_add(tv_node_sig_pipe[0], &tv_node_sig_io, true, false);
+        int err = tv_node_signal_setup();
+        if (err) { sigprocmask(SIG_SETMASK, &before, NULL); return num(ctx, err); }
+        struct sigaction sa = tv_node_signal_action();
+        if (sigaction(sig, &sa, &tv_node_sig_before[sig]) != 0) {
+            int err = errno;
+            sigprocmask(SIG_SETMASK, &before, NULL);
+            return num(ctx, -err);
         }
-        struct sigaction sa;
-        memset(&sa, 0, sizeof sa);
-        sa.sa_handler = tv_node_sig_caught;
-        sa.sa_flags = SA_RESTART;
-        sigemptyset(&sa.sa_mask);
-        if (sigaction(sig, &sa, &tv_node_sig_before[sig]) != 0) return num(ctx, -errno);
     } else {
-        sigaction(sig, &tv_node_sig_before[sig], NULL);
+        struct sigaction current;
+        if (sigaction(sig, NULL, &current) == 0 && current.sa_handler == tv_node_sig_caught)
+            sigaction(sig, &tv_node_sig_before[sig], NULL);
     }
     tv_node_sig_on[sig] = on;
+    sigprocmask(SIG_SETMASK, &before, NULL);
     return num(ctx, 0);
 }
 
@@ -2536,6 +2641,11 @@ typedef struct {
     tv_io io;
     int fd;
     bool reading, closed, refed, counted, watching, listening, connecting;
+    bool tty;
+    tv_node_tty_mode *raw_mode;
+    bool file;         /* regular file or non-tty device: not poll-watchable, read on the work queue */
+    int pending_file;  /* file-read jobs in flight (the struct outlives JS while they're pending) */
+    bool zombie;       /* JS released the handle mid-read: free(s) when the last read lands */
     JSObjectRef self, onread;
     JSObjectRef onconnection, connect_cb;   /* listen: onconnection(fd | null, err); connect: cb(status) */
     tv_node_wreq *wq, *wq_tail;
@@ -2543,9 +2653,97 @@ typedef struct {
     double bytes_read, bytes_written;
 } tv_node_stream;
 
+/* a chunk read of a file fd on a worker thread (regular files aren't poll-watchable) */
+typedef struct {
+    tv_node_job job;
+    tv_node_stream *s;
+    int fd;
+    uint8_t buf[65536];
+    ssize_t n;
+    int err;
+} tv_node_fread;
+
+static void tv_node_fread_work(tv_node_job *j) {
+    tv_node_fread *r = (tv_node_fread *)j;
+    for (;;) {
+        ssize_t n = read(r->fd, r->buf, sizeof r->buf);
+        if (n < 0 && errno == EINTR) continue;
+        if (n > 0) r->n = n;
+        else r->err = n == 0 ? TV_UV_EOF : -errno;
+        return;
+    }
+}
+
+static void tv_node_file_read(JSContextRef ctx, tv_node_stream *s);
+static void tv_node_stream_update(tv_node_stream *s);
+
+/* a file job landed after the stream stopped, closed or was released: drop the callback
+   (the work loop skips a NULL one) and finish the close/free that waited on it */
+static size_t tv_node_file_landed(JSContextRef ctx, tv_node_job *j, tv_node_stream *s) {
+    JSValueUnprotect(ctx, j->callback);
+    j->callback = NULL;
+    if ((s->closed || s->zombie) && s->fd >= 0) { close(s->fd); s->fd = -1; }
+    if (s->zombie && !s->pending_file) free(s);
+    return 0;
+}
+
+static size_t tv_node_fread_done(JSContextRef ctx, tv_node_job *j, JSValueRef *args) {
+    tv_node_fread *r = (tv_node_fread *)j;
+    tv_node_stream *s = r->s;
+    s->pending_file--;
+    if (!s->closed && !s->zombie && s->reading) {
+        if (r->n > 0) {
+            s->bytes_read += (double)r->n;
+            args[0] = tv_js_bytes_copy(r->buf, (size_t)r->n);
+            tv_node_file_read(ctx, s);   /* (the next chunk, while the stream wants more) */
+            return 1;
+        }
+        s->reading = false;
+        tv_node_stream_update(s);
+        args[0] = JSValueMakeNull(ctx);
+        args[1] = JSValueMakeNumber(ctx, r->err);
+        return 2;
+    }
+    return tv_node_file_landed(ctx, j, s);
+}
+
+/* shutdown on a file fd also goes through the work queue: no writable event is coming */
+typedef struct {
+    tv_node_job job;
+    tv_node_stream *s;
+    int fd;
+    int err;
+} tv_node_fshutdown;
+
+static void tv_node_fshutdown_work(tv_node_job *j) {
+    tv_node_fshutdown *r = (tv_node_fshutdown *)j;
+    r->err = shutdown(r->fd, SHUT_WR) != 0 && errno != ENOTSOCK ? -errno : 0;
+}
+
+static size_t tv_node_fshutdown_done(JSContextRef ctx, tv_node_job *j, JSValueRef *args) {
+    tv_node_fshutdown *r = (tv_node_fshutdown *)j;
+    tv_node_stream *s = r->s;
+    s->pending_file--;
+    if (s->closed || s->zombie) return tv_node_file_landed(ctx, j, s);
+    args[0] = JSValueMakeNumber(ctx, r->err);
+    return 1;
+}
+
+static void tv_node_file_read(JSContextRef ctx, tv_node_stream *s) {
+    tv_node_fread *r = calloc(1, sizeof *r);
+    r->job.work = tv_node_fread_work;
+    r->job.done = tv_node_fread_done;
+    r->s = s;
+    r->fd = s->fd;
+    s->pending_file++;
+    tv_node_queue(ctx, &r->job, s->onread);
+}
+
 static void tv_node_stream_finalize(JSObjectRef o) {
     tv_node_stream *s = JSObjectGetPrivate(o);
     if (!s) return;
+    if (s->raw_mode) { tv_node_tty_release(s->raw_mode, true); s->raw_mode = NULL; }
+    if (s->pending_file) { s->zombie = true; return; }   /* freed in tv_node_file_landed */
     if (s->fd >= 0) close(s->fd);
     free(s);
 }
@@ -2570,7 +2768,7 @@ static void tv_node_stream_ready(tv_io *h, bool readable, bool writable, bool br
 
 /* what the loop watches for, and whether the stream keeps the program running */
 static void tv_node_stream_update(tv_node_stream *s) {
-    bool want_read = (s->reading || s->listening) && !s->closed;
+    bool want_read = (s->reading || s->listening) && !s->closed && !s->file;
     bool want_write = !s->closed && (s->wq || s->shutdown_cb || s->connecting);
     if (s->fd >= 0 && !s->closed && (want_read || want_write || s->watching)) {
         s->io.ready = tv_node_stream_ready;
@@ -2679,7 +2877,7 @@ static void tv_node_stream_ready(tv_io *h, bool readable, bool writable, bool br
             JSValueRef arg = tv_js_bytes_copy(buf, (size_t)r);
             tv_node_call_args(s->onread, 1, &arg);
         } else if (r == 0 || (errno != EAGAIN && errno != EINTR)) {
-            int err = r == 0 ? TV_UV_EOF : -errno;
+            int err = r == 0 || (s->tty && errno == EIO) ? TV_UV_EOF : -errno;
             s->reading = false;
             JSValueRef args[2] = { JSValueMakeNull(tv_js_ctx), JSValueMakeNumber(tv_js_ctx, err) };
             tv_node_call_args(s->onread, 2, args);
@@ -2698,14 +2896,113 @@ NATIVE(n_stream_open) {
     }
     int fd = (int)arg_num(ctx, n, a, 0, -1);
     if (fd < 0) return undef(ctx);
+    /* Terminal fds can share an open file description with their parent or
+       stdio. Reopen so nonblocking reads do not mutate those shared flags.
+       Never reopen a PTY master: that would allocate a different terminal. */
+    if (isatty(fd) && !tv_node_tty_master(fd)) {
+        const char *path = ttyname(fd);
+        if (path && strcmp(path, "/dev/ptmx") && strcmp(path, "/dev/pts/ptmx")) {
+            int flags = fcntl(fd, F_GETFL);
+            if (flags < 0) return undef(ctx);
+            int copy = open(path, (flags & O_ACCMODE) | O_NOCTTY | O_CLOEXEC);
+            if (copy < 0) return undef(ctx);
+            fd = copy;
+        }
+    }
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
     tv_node_stream *s = calloc(1, sizeof *s);
     s->fd = fd;
+    s->tty = isatty(fd);
+    /* Regular files (and plain devices like /dev/null) can't be watched for
+       readability — reads go to the work queue, as libuv's fs reads do.
+       TTYs stay watched. */
+    struct stat st;
+    if (fstat(fd, &st) == 0 && (S_ISREG(st.st_mode) || (S_ISCHR(st.st_mode) && !isatty(fd)))) s->file = true;
     s->refed = true;
     JSObjectRef o = JSObjectMake(ctx, tv_node_stream_class(), s);
     s->self = o;
     JSValueProtect(ctx, o);
     return o;
+}
+
+NATIVE(n_stream_set_raw_mode) {
+    UNUSED;
+    tv_node_stream *s = tv_node_stream_of(ctx, n, a);
+    if (!s || s->closed) return num(ctx, -EBADF);
+    bool raw = n > 1 && JSValueToBoolean(ctx, a[1]);
+    if (raw == (s->raw_mode != NULL)) return num(ctx, 0);
+    if (!raw) {
+        int err = tv_node_tty_release(s->raw_mode, false);
+        if (!err) s->raw_mode = NULL;
+        return num(ctx, err);
+    }
+    struct stat st;
+    if (fstat(s->fd, &st) != 0) return num(ctx, -errno);
+    int pty_number = -1;
+    char slave_path[128] = {0};
+#ifdef TIOCGPTN
+    unsigned int index;
+    if (ioctl(s->fd, TIOCGPTN, &index) == 0) {
+        /* Match the slave's identity where available, and otherwise retain
+           the master's index rather than merging unrelated PTYs. */
+        snprintf(slave_path, sizeof slave_path, "/dev/pts/%u", index);
+        struct stat slave;
+        if (stat(slave_path, &slave) == 0) st = slave;
+        else { pty_number = (int)index; slave_path[0] = 0; }
+    }
+#endif
+#ifdef TIOCPTYGNAME
+    struct stat slave;
+    if (ioctl(s->fd, TIOCPTYGNAME, slave_path) == 0 && stat(slave_path, &slave) == 0) st = slave;
+    else slave_path[0] = 0;
+#endif
+    for (tv_node_tty_mode *m = tv_node_tty_modes; m; m = m->next) {
+        if (m->dev == st.st_dev && m->rdev == st.st_rdev && m->ino == st.st_ino && m->pty_number == pty_number) {
+            m->owners++;
+            s->raw_mode = m;
+            return num(ctx, 0);
+        }
+    }
+    tv_node_tty_mode *m = calloc(1, sizeof *m);
+    /* The slave path is only an identity key. Holding a slave here would
+       suppress master EOF when the child closes its terminal. */
+    m->fd = fcntl(s->fd, F_DUPFD_CLOEXEC, 0);
+    if (m->fd < 0) { int err = errno; free(m); return num(ctx, -err); }
+    struct termios t;
+    if (tcgetattr(m->fd, &t) != 0) {
+        int err = errno; close(m->fd); free(m); return num(ctx, -err);
+    }
+    m->saved = t;
+    m->dev = st.st_dev; m->rdev = st.st_rdev; m->ino = st.st_ino;
+    m->pty_number = pty_number;
+    m->owners = 1;
+    t.c_iflag &= (tcflag_t) ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    t.c_oflag |= ONLCR;
+    t.c_cflag |= CS8;
+    t.c_lflag &= (tcflag_t) ~(ECHO | ICANON | IEXTEN | ISIG);
+    t.c_cc[VMIN] = 1;
+    t.c_cc[VTIME] = 0;
+    /* Publish before enabling raw mode so default termination can always
+       restore the original snapshot. Block delivery across this transition. */
+    sigset_t before;
+    tv_node_tty_block_signals(&before);
+    m->next = tv_node_tty_modes;
+    tv_node_tty_modes = m;
+    int signal_err = tv_node_signal_defaults();
+    int err = signal_err ? signal_err : tcsetattr(m->fd, TCSADRAIN, &t) == 0 ? 0 : -errno;
+    if (err) {
+        tv_node_tty_modes = m->next;
+        if (!tv_node_tty_modes) tv_node_signal_defaults_stop();
+        close(m->fd);
+        free(m);
+    } else {
+        static bool registered;
+        if (!registered) { atexit(tv_node_tty_reset); registered = true; }
+        s->raw_mode = m;
+    }
+    sigprocmask(SIG_SETMASK, &before, NULL);
+    if (err) return num(ctx, err);
+    return num(ctx, 0);
 }
 
 /* readStart(handle, onread) */
@@ -2718,6 +3015,7 @@ NATIVE(n_stream_read_start) {
     JSValueProtect(ctx, a[1]);
     s->reading = true;
     tv_node_stream_update(s);
+    if (s->file) tv_node_file_read(ctx, s);
     return num(ctx, 0);
 }
 
@@ -2826,6 +3124,16 @@ NATIVE(n_stream_shutdown) {
     tv_node_stream *s = tv_node_stream_of(ctx, n, a);
     if (!s || s->closed || n < 2) return num(ctx, -ENOTCONN);
     if (s->shutdown_cb) return num(ctx, -EALREADY);
+    if (s->file) {
+        tv_node_fshutdown *r = calloc(1, sizeof *r);
+        r->job.work = tv_node_fshutdown_work;
+        r->job.done = tv_node_fshutdown_done;
+        r->s = s;
+        r->fd = s->fd;
+        s->pending_file++;
+        tv_node_queue(ctx, &r->job, a[1]);
+        return num(ctx, 0);
+    }
     s->shutdown_cb = (JSObjectRef)a[1];
     JSValueProtect(ctx, a[1]);
     tv_node_stream_update(s);
@@ -2840,12 +3148,20 @@ NATIVE(n_stream_close) {
     s->reading = false;
     tv_node_stream_update(s);
     s->closed = true;
+    if (s->raw_mode) { tv_node_tty_release(s->raw_mode, true); s->raw_mode = NULL; }
     if (s->counted) {
         tv_io_refs--;
         s->counted = false;
     }
-    if (s->fd >= 0) close(s->fd);
-    s->fd = -1;
+    if (s->fd >= 0) {
+        if (s->pending_file) {
+            /* a worker still owns a copy of this fd — the last landing
+               file job closes it (see tv_node_file_landed) */
+        } else {
+            close(s->fd);
+            s->fd = -1;
+        }
+    }
     while (s->wq) {
         tv_node_wreq *w = s->wq;
         s->wq = w->next;
@@ -3582,6 +3898,7 @@ static void tv_node_http_install(JSContextRef ctx, JSObjectRef native) {
 static void tv_node_streams_install(JSContextRef ctx, JSObjectRef native) {
     JSObjectRef st = JSObjectMake(ctx, NULL, NULL);
     tv_js_def(ctx, st, "open", n_stream_open);
+    tv_js_def(ctx, st, "setRawMode", n_stream_set_raw_mode);
     tv_js_def(ctx, st, "readStart", n_stream_read_start);
     tv_js_def(ctx, st, "readStop", n_stream_read_stop);
     tv_js_def(ctx, st, "write", n_stream_write);
@@ -3982,6 +4299,7 @@ static void tv_node_crypto_install(JSContextRef ctx, JSObjectRef native) {
 
 
 void tv_node_install(JSContextRef ctx, JSObjectRef native) {
+    tv_node_sig_thread = pthread_self();
     tv_js_def(ctx, native, "info", n_info);
     tv_js_def(ctx, native, "cwd", n_cwd);
     tv_js_def(ctx, native, "chdir", n_chdir);
@@ -3990,6 +4308,7 @@ void tv_node_install(JSContextRef ctx, JSObjectRef native) {
     tv_js_def(ctx, native, "hrtime", n_hrtime);
     tv_js_def(ctx, native, "write", n_write);
     tv_js_def(ctx, native, "isatty", n_isatty);
+    tv_js_def(ctx, native, "guessHandleType", n_guess_handle_type);
     tv_js_def(ctx, native, "windowSize", n_window_size);
     tv_js_def(ctx, native, "memoryUsage", n_memory_usage);
     tv_js_def(ctx, native, "cpuUsage", n_cpu_usage);
@@ -4001,7 +4320,6 @@ void tv_node_install(JSContextRef ctx, JSObjectRef native) {
     tv_js_def(ctx, native, "setTZ", n_set_tz);
     tv_js_def(ctx, native, "signal", n_signal);
     tv_js_def(ctx, native, "signalHandler", n_signal_handler);
-    tv_js_def(ctx, native, "setRawMode", n_set_raw_mode);
 
     tv_js_def(ctx, native, "now", n_now);
     tv_js_def(ctx, native, "timerSetup", n_timer_setup);
