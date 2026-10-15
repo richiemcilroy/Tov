@@ -1,0 +1,16 @@
+// number.toString(radix), checked against Node.js's output.
+function main() {
+  const ints: int[] = [255, -255, 0, 35, 36, 9007199254740991]
+  for (const n of ints) {
+    console.log(n.toString(16), n.toString(2), n.toString(36))
+  }
+  const big = -9223372036854775807 - 1
+  console.log(big.toString(16))
+  const fs: number[] = [0.5, 3.14159, 1e21, -0, 0.1, 9007199254740994, 123.456, -2.75]
+  for (const x of fs) {
+    console.log(x.toString(2), x.toString(3), x.toString(16), x.toString(36))
+  }
+  console.log((255).toString(10), (0.1 + 0.2).toString(10))
+  const r: int | undefined = undefined
+  console.log((255).toString(r))
+}

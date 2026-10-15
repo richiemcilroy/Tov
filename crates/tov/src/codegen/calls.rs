@@ -681,6 +681,21 @@ impl<'c, 'a> Gen<'c, 'a> {
                         self.tmp(STR, &format!("tv_f64_to_fixed({}, {d}, {loc})", x.code), true)
                     }
                 }
+                _ if !args.is_empty() => {
+                    // toString(radix), as BigInt's: an absent optional radix is 10
+                    let r = self.expr(args[0].expr);
+                    let present = self.truthy_val(r.clone());
+                    let r = self.project(r, INT);
+                    let radix = if present == "true" { r.code } else { format!("({present} ? {} : 10)", r.code) };
+                    let loc = self.loc(span);
+                    if self.c.types.is_int(recv) {
+                        let x = self.int_code(rv);
+                        self.tmp(STR, &format!("tv_int_to_radix({x}, {radix}, {loc})"), true)
+                    } else {
+                        let x = self.coerce(rv, F64);
+                        self.tmp(STR, &format!("tv_f64_to_radix({}, {radix}, {loc})", x.code), true)
+                    }
+                }
                 _ => {
                     if self.c.types.is_int(recv) {
                         let x = self.int_code(rv);

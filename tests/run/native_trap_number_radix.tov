@@ -1,0 +1,3 @@
+let r = 37
+console.log((255).toString(16))
+console.log((1.5).toString(r))

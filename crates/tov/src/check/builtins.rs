@@ -420,7 +420,10 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
         }
         _ if c.types.is_numeric(ty) => match name {
             "toFixed" => mk(sig(vec![(p(INT), "digits")], STR), false),
-            "toString" => mk(sig(vec![], STR), false),
+            "toString" => {
+                let radix = opt(c, INT);
+                mk(sig(vec![(radix, "radix")], STR), false)
+            }
             _ => None,
         },
         _ => None,

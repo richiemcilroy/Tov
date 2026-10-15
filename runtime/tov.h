@@ -133,7 +133,9 @@ static inline tv_int tv_str_byte_len(tv_str s) { return s.p->len; }
 
 /* JavaScript-compatible conversions */
 tv_str tv_str_from_int(tv_int v);
-tv_str tv_str_from_f64(double v);               /* Number.prototype.toString(): 1 → "1", 0.1+0.2 → "0.30000000000000004", 1e21 → "1e+21" */
+tv_str tv_str_from_f64(double v);
+tv_str tv_int_to_radix(tv_int v, tv_int radix, const char *loc);   /* (255).toString(16) → "ff"; traps outside 2..36 */
+tv_str tv_f64_to_radix(double v, tv_int radix, const char *loc);   /* as Number.prototype.toString(radix), fractions included */               /* Number.prototype.toString(): 1 → "1", 0.1+0.2 → "0.30000000000000004", 1e21 → "1e+21" */
 tv_str tv_str_from_bool(bool v);
 tv_str tv_f64_to_fixed(double v, tv_int digits, const char *loc); /* JS toFixed (round half up on exact ties); traps if digits ∉ 0..100 */
 tv_str tv_int_to_fixed(tv_int v, tv_int digits, const char *loc);

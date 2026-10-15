@@ -895,6 +895,78 @@ tv_str tv_str_from_f64(double v) {
     return tv_str_from(buf, tv_fmt_number(buf, v, false));
 }
 
+static const char tv_radix_digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+
+tv_str tv_int_to_radix(tv_int v, tv_int radix, const char *loc) {
+    if (radix < 2 || radix > 36) tv_trap("toString() radix must be between 2 and 36", loc);
+    char buf[72], *end = buf + sizeof buf, *p = end;
+    uint64_t u = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
+    do {
+        *--p = tv_radix_digits[u % (uint64_t)radix];
+        u /= (uint64_t)radix;
+    } while (u);
+    if (v < 0) *--p = '-';
+    return tv_str_from(p, (size_t)(end - p));
+}
+
+/* V8's DoubleToRadixCString: the shortest digits that read back as v, fractions
+   included, so the result matches JavaScript's digit for digit. */
+tv_str tv_f64_to_radix(double v, tv_int radix, const char *loc) {
+    if (radix < 2 || radix > 36) tv_trap("toString() radix must be between 2 and 36", loc);
+    if (radix == 10 || isnan(v) || isinf(v)) return tv_str_from_f64(v);
+    enum { SIZE = 2200 };
+    char buf[SIZE];
+    int icur = SIZE / 2, fcur = icur;
+    bool neg = v < 0;
+    if (neg) v = -v;
+    double integer = floor(v), fraction = v - integer;
+    /* half the distance to the next double: digits below it don't change the value */
+    double delta = 0.5 * (nextafter(v, INFINITY) - v);
+    if (delta < nextafter(0.0, 1.0)) delta = nextafter(0.0, 1.0);
+    int r = (int)radix;
+    if (fraction >= delta) {
+        buf[fcur++] = '.';
+        do {
+            fraction *= r;
+            delta *= r;
+            int digit = (int)fraction;
+            buf[fcur++] = tv_radix_digits[digit];
+            fraction -= digit;
+            if (fraction > 0.5 || (fraction == 0.5 && (digit & 1))) {
+                if (fraction + delta > 1) {
+                    /* round up, carrying into the integer part if every digit overflows */
+                    for (;;) {
+                        fcur--;
+                        if (fcur == SIZE / 2) {
+                            integer += 1;
+                            break;
+                        }
+                        char c = buf[fcur];
+                        int d = c > '9' ? c - 'a' + 10 : c - '0';
+                        if (d + 1 < r) {
+                            buf[fcur++] = tv_radix_digits[d + 1];
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+        } while (fraction >= delta);
+    }
+    /* integer digits; past 2^53 the low digits aren't represented and are zeros */
+    while (integer / r >= 9007199254740992.0) {
+        integer /= r;
+        buf[--icur] = '0';
+    }
+    do {
+        double rem = fmod(integer, r);
+        buf[--icur] = tv_radix_digits[(int)rem];
+        integer = (integer - rem) / r;
+    } while (integer > 0);
+    if (neg) buf[--icur] = '-';
+    return tv_str_from(buf + icur, (size_t)(fcur - icur));
+}
+
 void tv_sb_push_f64(tv_sb *sb, double v) {
     char buf[40];
     tv_sb_push(sb, buf, tv_fmt_number(buf, v, false));
