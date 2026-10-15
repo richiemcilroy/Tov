@@ -194,7 +194,10 @@ process.hasUncaughtExceptionCaptureCallback = () => typeof process._uncaughtCapt
 process.setSourceMapsEnabled = () => {};
 lazyProperty('report', () => ({ getReport: () => ({}) }));
 
-// EventEmitter: process becomes one (events loads) when first used as one
+// EventEmitter: process becomes one (events loads) when first used as one.
+// Its own methods stay and always call EventEmitter's with process as the
+// receiver, so a method read before or after that (a named import from
+// node:process, read once at its first use) keeps working.
 const emitterMethods = [
   'on', 'once', 'off', 'addListener', 'removeListener', 'removeAllListeners', 'emit', 'listeners',
   'rawListeners', 'listenerCount', 'prependListener', 'prependOnceListener', 'eventNames',
@@ -205,7 +208,6 @@ function becomeEmitter() {
   if (emitter) return;
   emitter = true;
   const EventEmitter = require('events');
-  for (const m of emitterMethods) delete process[m];
   Object.setPrototypeOf(process, Object.create(EventEmitter.prototype, {
     [Symbol.toStringTag]: { value: 'process', configurable: true },
   }));
@@ -244,7 +246,7 @@ for (const m of emitterMethods) {
     writable: true,
     value: function (...args) {
       becomeEmitter();
-      return process[m](...args);
+      return require('events').prototype[m].apply(process, args);
     },
   });
 }

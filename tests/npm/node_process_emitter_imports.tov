@@ -1,0 +1,35 @@
+// EventEmitter methods imported by name from node:process keep process as
+// their receiver, whether they are first used before or after process
+// becomes an EventEmitter (#38).
+import { emit, on, once, removeAllListeners, listenerCount, kill, pid } from "node:process"
+
+let calls = 0
+
+function onUsr2() {
+  calls = calls + 1
+}
+
+function onPing() {}
+
+function main() {
+  try {
+    // the first use of emit makes process an EventEmitter; on, once,
+    // removeAllListeners and listenerCount are first used after that
+    try emit("warmup")
+    try on("SIGUSR2", onUsr2)
+    console.log(`listenerCount: ${try listenerCount("SIGUSR2") as int}`)
+    try emit("SIGUSR2")
+    console.log(`listener called: ${calls}`)
+    // the listener on process catches the signal: without it, SIGUSR2's
+    // default action ends the program here
+    try kill(pid, "SIGUSR2")
+    console.log("survived SIGUSR2")
+    try removeAllListeners("SIGUSR2")
+    console.log(`after removeAllListeners: ${try listenerCount("SIGUSR2") as int}`)
+    // registered on process (calling a once listener is not checked here)
+    try once("ping", onPing)
+    console.log(`once listeners: ${try listenerCount("ping") as int}`)
+  } catch (e) {
+    console.log(`error: ${e.message}`)
+  }
+}

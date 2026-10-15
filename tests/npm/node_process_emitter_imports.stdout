@@ -1,0 +1,5 @@
+listenerCount: 1
+listener called: 1
+survived SIGUSR2
+after removeAllListeners: 0
+once listeners: 1
