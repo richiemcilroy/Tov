@@ -1,29 +1,78 @@
+<div align="center">
+
 # Tov
 
-A programming language for coding agents. Tov reads like TypeScript, so your agent can already write it, and when the agent gets something wrong the compiler hands back the edit that fixes it. What comes out is one native binary, faster than Rust's on our benchmarks and in a fraction of the memory Bun uses ([the numbers](#performance)).
+**A programming language for coding agents.**
 
-To start, paste the prompt on [tov.sh](https://tov.sh) into your agent. It installs Tov and reads [tov.sh/llms.txt](https://tov.sh/llms.txt), which is the language written up for agents. To install it yourself, run `curl -fsSL https://tov.sh/install.sh | sh`. That builds Tov from source, so it needs git and a C compiler.
+Reads like TypeScript. Compiles to one tiny native binary. When the agent gets something wrong, the compiler hands back the edit that fixes it.
 
-Code that looks like TypeScript behaves like TypeScript, or doesn't compile. Bun's and Node's APIs are there (`Bun.serve`, `fetch`, `node:fs`, `async`/`await`), and so are npm packages: an app written for Bun runs on Tov unchanged. What Tov leaves out is what makes programs hard to follow. There's no `any`, `null` or `==`, a call that can fail is marked `try`, integer overflow stops the program, and arrays and records are values, so nothing changes behind the agent's back. Errors have a code, and where the fix is clear, `tov check --json` returns the exact edit and says whether it's safe to apply as it is.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![Version](https://img.shields.io/badge/version-0.0.1-orange.svg)](#status)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20arm64%20%7C%20Linux-lightgrey.svg)](#status)
+[![Built with Rust](https://img.shields.io/badge/compiler-Rust-b7410e?logo=rust&logoColor=white)](./crates/tov)
+[![Status: early](https://img.shields.io/badge/status-early%20%F0%9F%9A%A7-yellow.svg)](#status)
 
-A program compiles in about 42 ms (Rust: 98). A web server serves 242,000 requests a second on one core in 1.6 MB of memory, against 216,000 in 4.4 MB for Rust's axum and 111,000 in 17 MB for Bun (macOS, M4 Max).
+[Website](https://tov.sh) · [Agent guide (`llms.txt`)](https://tov.sh/llms.txt) · [Language spec](docs/spec.md) · [Benchmarks](#performance)
 
-The landing page, [site/](site/), is a Tov program: `cd site && tov dev`.
+</div>
 
-## Status
+---
 
-Tov is early, and it changes every day. It's at version 0.0.1.
+## Table of contents
 
-| Works today | Not yet |
+- [Why Tov](#why-tov)
+- [Quick start](#quick-start)
+- [How an agent works with Tov](#how-an-agent-works-with-tov)
+- [Example](#example)
+- [Commands](#commands)
+- [How it differs from TypeScript](#how-it-differs-from-typescript)
+- [npm packages and Bun apps](#npm-packages-and-bun-apps)
+- [Status](#status)
+- [Performance](#performance)
+- [Development](#development)
+- [Project layout](#project-layout)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## Why Tov
+
+Code that looks like TypeScript behaves like TypeScript, or doesn't compile. Tov keeps the syntax agents already know and removes what makes programs hard to follow.
+
+| | |
 |---|---|
-| Command-line programs and web servers | Windows |
-| Records, unions, generics, classes, interfaces, checked errors | A package manager of its own (install packages with npm or Bun) |
-| `async`/`await`, promises, timers | Tuples, enums and some other TypeScript features ([spec](docs/spec.md)) |
-| `fetch()` over HTTP and HTTPS, with streaming, compression and proxies | TLS sockets (`tls.connect`) and worker threads for npm packages |
-| Bun's server API (`Bun.serve`, routes, `Request`, `Response`) | `Promise.allSettled`/`any`, `.then`/`.catch` |
-| A Node-style standard library (`fs`, `path`, `process`) | |
-| npm packages, including Node-API native addons, and Bun apps | |
-| macOS (arm64) and Linux | |
+| **Agents already know it** | TypeScript syntax, Bun and Node APIs (`Bun.serve`, `fetch`, `node:fs`, `async`/`await`) and npm packages. An app written for Bun runs on Tov unchanged. |
+| **Errors that come with the fix** | Every error has a code. Where the fix is clear, `tov check --json` returns the exact edit and says whether it's safe to apply as it is. |
+| **No hidden behavior** | No `any`, `null` or `==`. Calls that can fail are marked `try`. Integer overflow stops the program. Arrays and records are values, so nothing changes behind the agent's back. |
+| **Fast, small, native** | One native binary. A program compiles in about 42 ms (Rust: 98). A web server serves 242,000 req/s on one core in 1.6 MB, against 216,000 in 4.4 MB for Rust's axum and 111,000 in 17 MB for Bun (macOS, M4 Max). See [the numbers](#performance). |
+
+## Quick start
+
+### 1. Let your agent do it
+
+Paste the prompt from **[tov.sh](https://tov.sh)** into your agent. It installs Tov and reads [tov.sh/llms.txt](https://tov.sh/llms.txt), the language written up for agents.
+
+### 2. Install it yourself
+
+```sh
+curl -fsSL https://tov.sh/install.sh | sh
+```
+
+This builds Tov from source, so it needs `git` and a C compiler.
+
+### 3. Build from a clone
+
+You need Rust (to build the compiler) and a C compiler (`clang` or `gcc`).
+
+```sh
+git clone https://github.com/richiemcilroy/Tov
+cd Tov && cargo install --path crates/tov   # puts `tov` in ~/.cargo/bin
+
+tov run examples/shapes                      # build and run main()
+```
+
+The landing page, [site/](site/), is itself a Tov program: `cd site && tov dev`.
 
 ## How an agent works with Tov
 
@@ -97,36 +146,33 @@ test("rect area", () => {
 })
 ```
 
-## Getting started
+## Commands
 
-You need Rust (to build the compiler) and a C compiler (`clang` or `gcc`).
+| Command | What it does |
+|---|---|
+| `tov run examples/shapes` | Build and run `main()` |
+| `tov <file> [args...]` | Run a program and pass it the arguments after the file name |
+| `tov --watch server.tov` | Rebuild and restart when the entry file or anything it imports changes |
+| `tov dev` | Run `package.json`'s `"dev"` script, as `bun dev` does |
+| `tov <script>` | Run a `package.json` script (with `pre`/`post` scripts, the `npm_*` environment and Bun's output) |
+| `tov test examples` | Run every `test(...)` |
+| `tov build examples/shapes -o app` | Write a native binary |
+| `tov check src/` | Type-check only (add `--json` for tools) |
+| `tov explain T0001` | Explain what an error code means |
 
-```sh
-git clone https://github.com/richiemcilroy/Tov
-cd Tov && cargo install --path crates/tov   # puts `tov` in ~/.cargo/bin
-
-tov run examples/shapes          # build and run main()
-tov --watch server.tov          # rebuild and restart when a source file changes
-tov dev                          # run package.json's "dev" script, as `bun dev` does
-tov test examples                # run every test(...)
-tov build examples/shapes -o app # write a native binary
-tov check src/                   # type-check only (--json for tools)
-tov explain T0001                # what an error code means
-```
-
-The command line works like Bun's: `tov <file>` runs a program and passes it the arguments after the file name, `tov <script>` runs a `package.json` script (with `pre`/`post` scripts, the `npm_*` environment and Bun's output), and `--watch` restarts the program when the entry file or anything it imports changes.
+The command line works like Bun's.
 
 ## How it differs from TypeScript
 
 Tov keeps TypeScript's syntax and drops the parts that make programs hard to reason about or slow to run:
 
-- No `any`, `null`, `==` or implicit type conversions.
-- `int` and `f64` are separate types. Integer overflow traps instead of silently losing precision.
-- Arrays, records and maps are values. Assigning one makes a copy, and the compiler flags code where TypeScript would have shared the value instead.
-- To modify a caller's value, a function declares an `inout` parameter and the caller passes `&x`.
-- Every call that can fail is marked `try` (or caught), and a function's errors are part of its type.
-- Unions of object types must be narrowed before you use their fields, and a `switch` must cover every case.
-- Classes are reference-counted, not garbage-collected. If instances of a class could reference each other in a cycle, the compiler asks you to mark the back-reference `weak`, make it `readonly`, or declare a `cyclic class` (which adds cycle collection for that class only).
+- **No `any`, `null`, `==` or implicit type conversions.**
+- **Separate number types.** `int` and `f64` are distinct. Integer overflow traps instead of silently losing precision.
+- **Value semantics.** Arrays, records and maps are values. Assigning one makes a copy, and the compiler flags code where TypeScript would have shared the value instead.
+- **Explicit mutation.** To modify a caller's value, a function declares an `inout` parameter and the caller passes `&x`.
+- **Visible failure.** Every call that can fail is marked `try` (or caught), and a function's errors are part of its type.
+- **Exhaustive matching.** Unions of object types must be narrowed before you use their fields, and a `switch` must cover every case.
+- **Reference-counted classes.** Classes are reference-counted, not garbage-collected. If instances of a class could reference each other in a cycle, the compiler asks you to mark the back-reference `weak`, make it `readonly`, or declare a `cyclic class` (which adds cycle collection for that class only).
 
 The full list is in [docs/spec.md](docs/spec.md).
 
@@ -158,9 +204,24 @@ function main() {
 
 Programs that import npm packages link Tov's own build of JavaScriptCore when it's built (`scripts/jsc/build.sh`, about 10 minutes), or else the system's (macOS) or WebKitGTK's (Linux). The engine makes such a binary about 34 MB; programs that don't import npm packages don't include it.
 
+## Status
+
+> **Tov is early and changes every day.** Current version: **0.0.1**.
+
+| ✅ Works today | 🚧 Not yet |
+|---|---|
+| Command-line programs and web servers | Windows |
+| Records, unions, generics, classes, interfaces, checked errors | A package manager of its own (install packages with npm or Bun) |
+| `async`/`await`, promises, timers | Tuples, enums and some other TypeScript features ([spec](docs/spec.md)) |
+| `fetch()` over HTTP and HTTPS, with streaming, compression and proxies | TLS sockets (`tls.connect`) and worker threads for npm packages |
+| Bun's server API (`Bun.serve`, routes, `Request`, `Response`) | `Promise.allSettled`/`any`, `.then`/`.catch` |
+| A Node-style standard library (`fs`, `path`, `process`) | |
+| npm packages, including Node-API native addons, and Bun apps | |
+| macOS (arm64) and Linux | |
+
 ## Performance
 
-All numbers are from an Apple M4 Max. Each benchmark's README has its method, every result, its caveats and, for most, the same benchmark on Linux (x86-64).
+All numbers are from an Apple M4 Max unless noted. Each benchmark's README has its method, every result, its caveats and, for most, the same benchmark on Linux (x86-64). Reproduce them with `python3 bench/run.py`.
 
 ### Programs
 
@@ -182,9 +243,14 @@ Median wall time and peak memory. Every language prints identical output ([bench
 | async_calls (awaited calls) | — | **14 ms** · 2.0 MB | 643 ms · 81 MB | 525 ms · 30 MB | 17 ms · 1.9 MB |
 | async_tasks (1,000 tasks) | — | **136 ms** · 2.3 MB | 353 ms · 97 MB | 179 ms · 31 MB | 137 ms · 2.5 MB |
 
+<details>
+<summary><b>Caveats and build sizes</b></summary>
+
 Tov checks for integer overflow by default; Rust's release builds don't. `points` is bound by floating-point add latency in all three compiled languages. The async benchmarks' Rust runs on tokio's single-threaded runtime, one core like the others. Some differences are the libraries': Rust's `HashMap` hashes with SipHash (DoS-resistant and slower), and C's `qsort` calls its comparator through a function pointer.
 
-Binaries are 33 KB for most of these, the same as C (83 KB at most; Rust's are 330–370 KB stripped), and a build takes 0.04–0.11 s (C 0.04–0.06 s, Rust 0.08–0.23 s, or about 2 s with tokio or serde). Run them yourself with `python3 bench/run.py`.
+Binaries are 33 KB for most of these, the same as C (83 KB at most; Rust's are 330–370 KB stripped), and a build takes 0.04–0.11 s (C 0.04–0.06 s, Rust 0.08–0.23 s, or about 2 s with tokio or serde).
+
+</details>
 
 ### HTTP server
 
@@ -261,7 +327,7 @@ Requests per second on Linux (Docker), 128 keep-alive connections, JSON route, w
 
 Tov does the media work on less CPU than Bun (29% less per probe), but with 4 probes in flight Bun finishes 8% more of them each second: its `fetch()` client runs on a thread of its own, and Tov's runs on the event loop. Tov's binary is 36 MB with its engine and builds in 1.3 s with nothing cached.
 
-Where Tov is behind: a million calls from Tov into a small npm function (zod's `safeParse`) take 146 ms, against 104 ms when Bun runs the same program in JavaScript, because every call crosses from native code into the engine; and a program using npm packages starts in 11.5 ms, against Bun's 10.1 ([bench/npm/README.md](bench/npm/README.md)).
+**Where Tov is behind:** a million calls from Tov into a small npm function (zod's `safeParse`) take 146 ms, against 104 ms when Bun runs the same program in JavaScript, because every call crosses from native code into the engine; and a program using npm packages starts in 11.5 ms, against Bun's 10.1 ([bench/npm/README.md](bench/npm/README.md)).
 
 ## Development
 
@@ -271,20 +337,34 @@ scripts/linux.sh                  # the npm tests in a Linux container (any comm
 scripts/jsc/build.sh              # Tov's own JavaScriptCore (`scripts/jsc/build.sh linux` for Linux's)
 python3 bench/run.py              # cross-language benchmarks
 python3 bench/http/run.py         # HTTP server benchmark (bench/http/linux.sh for Linux)
-scripts/sanitize.sh run file.tov # run under ASan/UBSan in a Linux container
+scripts/sanitize.sh run file.tov  # run under ASan/UBSan in a Linux container
 ```
 
 ## Project layout
 
-- `crates/tov/`: the compiler and the npm bundler (Rust, no dependencies)
-- `runtime/`: the C runtime linked into every program (the event loop, HTTP server and client), the JavaScriptCore bridge (`js.c`, `napi.c`) and Node's built-ins for npm packages (`node.c`, `node/`)
-- `scripts/jsc/`: Tov's build of JavaScriptCore and its patches
-- `vendor/boringssl/`, `vendor/brotli/`, `vendor/zstd/`: BoringSSL (Apache-2.0) for TLS, and the brotli (MIT) and zstd (BSD) codecs. They're compiled once, and only programs that use them link them (see each `TOV.md`).
-- `examples/`: sample programs
-- `tests/`: checker snapshots, run tests, fuzzing, and npm, HTTP and parity tests
-- `bench/`: benchmarks against C, Rust, Node and Bun, and Cap's media server on Bun and Tov
-- `site/`: the landing page, a Tov program (`cd site && tov dev`)
-- `docs/`: the [language spec](docs/spec.md)
+```text
+Tov/
+├── crates/tov/        # the compiler and the npm bundler (Rust, no dependencies)
+├── runtime/           # C runtime linked into every program: event loop, HTTP server and client,
+│                      #   the JavaScriptCore bridge (js.c, napi.c), Node's built-ins (node.c, node/)
+├── scripts/jsc/       # Tov's build of JavaScriptCore and its patches
+├── vendor/            # boringssl (Apache-2.0, TLS), brotli (MIT), zstd (BSD); see each TOV.md
+├── examples/          # sample programs
+├── tests/             # checker snapshots, run tests, fuzzing, npm, HTTP and parity tests
+├── bench/             # benchmarks vs C, Rust, Node and Bun, plus Cap's media server
+├── site/              # the landing page, a Tov program (cd site && tov dev)
+└── docs/              # the language spec (docs/spec.md)
+```
+
+The vendored libraries are compiled once, and only programs that use them link them.
+
+## Contributing
+
+Tov is early, so the best contributions right now are bug reports with a minimal `.tov` file, error messages whose suggested fix is wrong or missing, and TypeScript or Bun programs that don't port cleanly.
+
+1. Fork the repo and create a branch.
+2. Make your change and run `cargo test`.
+3. Open a pull request describing what changed and why.
 
 ## License
 
