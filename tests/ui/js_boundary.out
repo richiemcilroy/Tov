@@ -1,0 +1,14 @@
+error[T0901] js_boundary.tov:37:15: a `(int) => Js` can't be passed to JavaScript
+   37 |   try lib.run((n: int) => n)
+  why: values are converted for JavaScript: numbers, strings, booleans, `undefined`, arrays, records, `Js` values, and functions taking `Js`
+
+error[T0901] js_boundary.tov:38:15: a `(Js) => Map<string, int>` can't be passed to JavaScript
+   38 |   try lib.run((ctx: Js) => new Map<string, int>())
+  why: values are converted for JavaScript: numbers, strings, booleans, `undefined`, arrays, records, `Js` values, and functions taking `Js`
+
+error[T0832] js_boundary.tov:40:34: this throws `JsError`, but this closure's type doesn't let it pass errors on
+   40 |   const v = apply((x: Js) => try x.params, lib)
+  instead: catch it inside the closure: `try { ... } catch (e) { ... }`
+  or: let the function type throw: `(...) => T throws JsError`
+
+3 error(s)

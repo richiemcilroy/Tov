@@ -46,7 +46,7 @@ pub(crate) struct Body {
     pub locals: FxMap<u32, Local>,
     pub(crate) scopes: Vec<Scope>,
     pub(crate) temps: Vec<Vec<(String, TyId)>>,
-    ret: TyId,
+    pub(crate) ret: TyId,
     /// (continue label, scope depth at loop body entry)
     loops: Vec<(String, usize)>,
     /// (target, scope depth to unwind to)
@@ -70,6 +70,11 @@ pub(crate) struct Body {
     pub async_fn: Option<(u32, u32)>,
     /// Awaited calls embedded in the frame: (union member, frame type).
     pub children: Vec<(String, String)>,
+    /// On the unwind channel: `aw_` says whether it was called through it (see `unwind.rs`).
+    pub aware: bool,
+    /// An async arrow passed to JavaScript: an uncaught JavaScript exception in it, or coming
+    /// back through the channel from what it calls, is an error (its promise rejects).
+    pub root: bool,
     /// Enclosing `try` blocks that have a `finally`, innermost last: (the `finally` block, scope
     /// depth outside the `try`). `return`, `break` and `continue` run them on the way out.
     pub finallies: Vec<(StmtId, usize)>,
@@ -235,6 +240,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             handlers: Vec::new(),
             async_fn: None,
             children: Vec::new(),
+            aware: false,
+            root: false,
             finallies: Vec::new(),
             tre: None,
             in_bounds: Vec::new(),
@@ -330,7 +337,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     /// Emits releases for every scope deeper than `depth` (without closing them).
-    fn unwind_to(&mut self, depth: usize) {
+    pub(crate) fn unwind_to(&mut self, depth: usize) {
         let mut lines = Vec::new();
         for scope in self.b().scopes[depth..].iter().rev() {
             for r in scope.releases.iter().rev() {
@@ -375,7 +382,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.unwind_range(prev, depth);
     }
 
-    fn release_all_temps(&mut self) {
+    pub(crate) fn release_all_temps(&mut self) {
         let mut lines = Vec::new();
         let all: Vec<(String, TyId)> = self.b().temps.iter().flat_map(|s| s.iter().cloned()).collect();
         for (name, ty) in all.into_iter().rev() {
@@ -424,6 +431,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             handlers: Vec::new(),
             async_fn: self.pending_async.take(),
             children: Vec::new(),
+            aware: std::mem::take(&mut self.pending_aware),
+            root: std::mem::take(&mut self.pending_root),
             finallies: Vec::new(),
             tre: self.pending_tre.take(),
             in_bounds: Vec::new(),
@@ -439,7 +448,13 @@ impl<'c, 'a> Gen<'c, 'a> {
             body.params.insert(key);
         }
         body.unique.extend(entry_unique.unwrap_or_default());
+        let aware = body.aware && body.async_fn.is_none();
+        let root = body.root;
+        body.aware = aware || root;
         self.bodies.push(body);
+        if aware && !root {
+            self.line("bool aw_ = tv_js_direct; tv_js_direct = false; (void)aw_;");
+        }
         // Constructors of classes without a base class run their field initializers first.
         if let Some(cls) = ctor_class
             && (matches!(kind, FnBodyKind::Init) || self.class_base_of(cls).is_none())
@@ -1342,7 +1357,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                         let loc = self.loc(span);
                         self.line(format!("uint32_t {n} = tv_js_length({arr});"));
                         self.open(&format!("for (uint32_t {idx} = 0; {idx} < {n}; {idx}++) {{"));
-                        self.line(format!("JSValueRef {var} = tv_js_at_or_trap({arr}, (double){idx}, {loc});"));
+                        let x = format!("{var}x");
+                        self.line(format!("JSValueRef {x} = NULL; JSValueRef {var} = tv_js_at_exc({arr}, (double){idx}, &{x});"));
+                        self.js_uncaught(&var, &x, &loc);
                     }
                     Ty::Set(_) => {
                         let kd = self.desc(elem);
@@ -1923,9 +1940,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if self.c.types.without_undefined(ot) == JS
                     && let Some(v) = self.js_try_fuse(e, ty, span)
                 {
+                    self.js_read_check(e);
                     return v;
                 }
-                self.index(*obj, *index, *optional, ty, span)
+                self.index(e, *obj, *index, *optional, ty, span)
             }
             ExprKind::Object(fields) => {
                 let target = self.c.unfold(ty);
@@ -2940,11 +2958,14 @@ impl<'c, 'a> Gen<'c, 'a> {
         let ot = self.ty(obj);
         if self.c.types.without_undefined(ot) == JS {
             if let Some(v) = self.js_try_fuse(e, ty, span) {
+                self.js_read_check(e);
                 return v;
             }
             let base = self.expr(obj);
             let base = self.js_of(base);
-            return self.js_member(base, name, optional, ty, span);
+            let v = self.js_member(e, base, name, optional, ty, span);
+            self.js_read_check(e);
+            return v;
         }
         match self.facts(m).members.get(&e).copied() {
             Some(MemberFact::NsFn(fm, fi)) => {
@@ -3107,13 +3128,15 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
     }
 
-    fn index(&mut self, obj: ExprId, index: ExprId, optional: bool, ty: TyId, span: Span) -> Val {
+    fn index(&mut self, e: ExprId, obj: ExprId, index: ExprId, optional: bool, ty: TyId, span: Span) -> Val {
         let ot = self.ty(obj);
         if self.c.types.without_undefined(ot) == JS {
             let base = self.expr(obj);
             let base = self.js_of(base);
             let iv = self.expr(index);
-            return self.js_index(base, iv, optional, ty, span);
+            let v = self.js_index(e, base, iv, optional, ty, span);
+            self.js_read_check(e);
+            return v;
         }
         let _ = (optional, span);
         let a = self.expr(obj);
@@ -3570,6 +3593,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             env_locals.insert(*k, Local { access, ty: *ty });
         }
         if f.is_async {
+            self.pending_root = self.facts(m).js_async_roots.contains(&e);
             self.emit_async_arrow(&cname, m, subst, &params, ret, kind, env_locals);
             return ArrowInfo { cname, env_type, captures };
         }
@@ -3603,6 +3627,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             handlers: Vec::new(),
             async_fn: self.pending_async.take(),
             children: Vec::new(),
+            aware: false,
+            root: std::mem::take(&mut self.pending_root),
             finallies: Vec::new(),
             tre: None,
             in_bounds: Vec::new(),
@@ -3613,7 +3639,13 @@ impl<'c, 'a> Gen<'c, 'a> {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
             body.locals.insert(key, Local { access, ty });
         }
+        let root = body.root;
+        let aware = self.npm && body.async_fn.is_none();
+        body.aware = aware || root;
         self.bodies.push(body);
+        if aware && !root {
+            self.line("bool aw_ = tv_js_direct; tv_js_direct = false; (void)aw_;");
+        }
         match kind {
             FnBodyKind::Block(s) => {
                 self.stmt_list_of(s);

@@ -22,6 +22,7 @@
 #define TOV_JS_H
 
 #include "tov.h"
+#include <setjmp.h>
 
 /* The same typedefs as <JavaScriptCore/JSBase.h> (repeating a typedef is allowed in C11). */
 typedef const struct OpaqueJSContextGroup *JSContextGroupRef;
@@ -212,6 +213,9 @@ JSValueRef tv_js_import_as(const char *spec, int kind, const char *loc);
 JSValueRef tv_js_get_or_trap(JSValueRef obj, tv_js_name *key, const char *loc);
 JSValueRef tv_js_at_or_trap(JSValueRef obj, double i, const char *loc);
 JSValueRef tv_js_key_or_trap(JSValueRef obj, tv_str key, const char *loc);
+/* the same reads, failing with NULL and *exc (a read marked `try`) */
+JSValueRef tv_js_at_exc(JSValueRef obj, double i, JSValueRef *exc);
+JSValueRef tv_js_key_exc(JSValueRef obj, tv_str key, JSValueRef *exc);
 void tv_js_put_or_trap(JSValueRef obj, tv_js_name *key, JSValueRef value, const char *loc);
 /* A value from JavaScript that doesn't convert to the type `want` names: traps. */
 _Noreturn void tv_js_type_trap(JSValueRef v, const char *want, const char *loc);
@@ -234,9 +238,40 @@ JSValueRef tv_js_array(size_t n, const JSValueRef *items);
 JSValueRef tv_js_object(void);
 JSValueRef tv_js_lit(JSValueRef *slot, const char *s, size_t n);   /* a string literal, created once */
 /* A JavaScript function calling a Tov closure through `tramp` (generated per signature); the
- * closure's environment is held until the function is collected. */
-typedef JSValueRef (*tv_js_tramp)(const tv_fn *fn, size_t n, const JSValueRef *args);
+ * closure's environment is held until the function is collected. An error the closure passes on
+ * is thrown into JavaScript: `tramp` sets `*exc` and returns NULL. */
+typedef JSValueRef (*tv_js_tramp)(const tv_fn *fn, size_t n, const JSValueRef *args, JSValueRef *exc);
+/* A trampoline's catch point (on its stack, pushed as tv_js_unwind_top while the closure runs). An
+ * uncaught JavaScript exception in Tov code under it jumps there, and the trampoline throws it
+ * into its JavaScript caller, as a JavaScript function would. What makes that safe:
+ * - a trap jumps only after the engine call that raised it has returned, so no JavaScriptCore
+ *   frame is ever jumped over (tv_js_trap_exc's callers);
+ * - the only other ways JavaScript runs Tov code, promise reactions (tv_js_fulfill_fn and
+ *   tv_js_reject_fn), only queue it, and Tov's scheduler clears the stack while it runs its own
+ *   jobs, so nothing jumps to a call it isn't running under;
+ * - one JavaScript VM, on the main thread: the stack is a plain global. */
+/* (the catch point is armed on every call from JavaScript, so it's the compiler's lightweight
+ * setjmp where that's known to work, saving only what resuming needs; else _setjmp, which
+ * doesn't save the signal mask either) */
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+typedef void *tv_js_jmp[5];
+#define TV_JS_SETJMP(b) __builtin_setjmp(b)
+#define TV_JS_LONGJMP(b) __builtin_longjmp(b, 1)
+#else
+typedef jmp_buf tv_js_jmp;
+#define TV_JS_SETJMP(b) _setjmp(b)
+#define TV_JS_LONGJMP(b) _longjmp(b, 1)
+#endif
+typedef struct tv_js_unwind {
+    void *prev;
+    tv_js_jmp jb;
+} tv_js_unwind;
+extern JSValueRef tv_js_unwind_exc;   /* the exception being carried to the catch point */
 JSValueRef tv_js_function(tv_fn fn, tv_js_tramp tramp);
+/* A JavaScript `Error` with this name and message (a Tov error thrown into JavaScript) */
+JSValueRef tv_js_error_value(tv_str name, tv_str message);
+/* A Tov promise as a JavaScript promise: settled with `value(&its value)` or `err(its error)` */
+JSValueRef tv_js_promise_of(tv_promise *p, JSValueRef (*value)(const void *), JSValueRef (*err)(void *));
 
 /* ------------------------------------------------------------------ bytes */
 

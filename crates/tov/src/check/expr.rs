@@ -164,7 +164,7 @@ impl<'a> Checker<'a> {
                 t
             }
             ExprKind::Member { obj, name, name_span, optional } => self.member(e, *obj, *name, *name_span, *optional, span),
-            ExprKind::Index { obj, index, optional } => self.index(*obj, *index, *optional, span),
+            ExprKind::Index { obj, index, optional } => self.index(e, *obj, *index, *optional, span),
             ExprKind::Object(fields) => self.object(fields, exp, span),
             ExprKind::Array(elems) => self.array_lit(elems, exp, span),
             ExprKind::Arrow(f) => self.arrow(f, exp, span),
@@ -298,7 +298,7 @@ impl<'a> Checker<'a> {
                     );
                     return ERROR;
                 }
-                return self.types.func(sig.params, sig.ret);
+                return self.fn_value_type(sig);
             }
             Some(Decl::Const(m, i)) => {
                 if let Some(t) = self.lookup_global((m, i)) {
@@ -1266,7 +1266,7 @@ impl<'a> Checker<'a> {
         self.report(d);
     }
 
-    fn index(&mut self, obj: ExprId, index: ExprId, optional: bool, span: Span) -> TyId {
+    fn index(&mut self, e: ExprId, obj: ExprId, index: ExprId, optional: bool, span: Span) -> TyId {
         let t = self.expr(obj, None);
         let base = if optional {
             self.types.without_undefined(t)
@@ -1284,6 +1284,7 @@ impl<'a> Checker<'a> {
                 let s = self.ast().expr(index).span;
                 self.report(Diagnostic::new("T0902", s, format!("a JavaScript property key must be a number or a string, found `{shown}`")));
             }
+            self.js_read(e, span);
             return JS;
         }
         let result = match *self.types.get(base) {
@@ -1399,6 +1400,7 @@ impl<'a> Checker<'a> {
         }
         if self.types.without_undefined(t) == JS {
             // a JavaScript property (`undefined` if there's none)
+            self.js_read(e, span);
             return JS;
         }
         // `req.params` in a `routes` handler: `{ id: string }` for "/users/:id".
@@ -1520,7 +1522,7 @@ impl<'a> Checker<'a> {
         let decl = scope.values.get(&name).filter(|_| scope.exported_values.contains(&name)).map(|d| d.0);
         match decl {
             Some(Decl::Fn(fm, fi)) => match self.fn_sig(fm, fi) {
-                Some(sig) if sig.tparams.is_empty() => self.types.func(sig.params, sig.ret),
+                Some(sig) if sig.tparams.is_empty() => self.fn_value_type(sig),
                 Some(_) => {
                     let n = self.name(name).to_string();
                     self.report(Diagnostic::new("T0304", name_span, format!("generic function `{n}` must be called")));
@@ -2481,11 +2483,20 @@ impl<'a> Checker<'a> {
     /// Can a Tov value of type `t` go to JavaScript? It's converted on the way: numbers,
     /// strings, booleans, `undefined`, arrays, records and unions of these, `Js` itself, and
     /// functions whose parameters are `Js` (JavaScript calls them back).
+    /// A function used as a value: its type keeps `throws`, so a call through the value is a
+    /// marked call, as a direct one is (a `throws` still being inferred reads as `Error`).
+    fn fn_value_type(&mut self, sig: Sig) -> TyId {
+        let throws = if sig.throws == UNKNOWN { self.error_class() } else { sig.throws };
+        self.types.func_throws(sig.params, sig.ret, throws)
+    }
+
     pub(super) fn js_convertible(&mut self, t: TyId) -> bool {
         match *self.types.get(t) {
             Ty::Js | Ty::Error | Ty::Never | Ty::Str | Ty::StrLit(_) | Ty::Bool | Ty::Undefined | Ty::Void => true,
             Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 => true,
             Ty::Array(e) => self.js_convertible(e),
+            // (a JavaScript promise, settled when this one is)
+            Ty::Promise(v, _) => self.js_convertible(v),
             Ty::Record(fs) => {
                 let fs = self.types.fields(fs).to_vec();
                 fs.iter().all(|f| self.js_convertible(f.ty))
@@ -2494,9 +2505,10 @@ impl<'a> Checker<'a> {
                 let ms = self.types.tys(ms).to_vec();
                 ms.iter().all(|&m| self.js_convertible(m))
             }
-            Ty::Func(ps, r, th) => {
+            // (an error the function passes on is thrown into JavaScript)
+            Ty::Func(ps, r, _) => {
                 let ps = self.types.params(ps).to_vec();
-                th == NEVER && ps.iter().all(|p| p.ty == JS && !p.inout) && self.js_convertible(r)
+                ps.iter().all(|p| p.ty == JS && !p.inout) && self.js_convertible(r)
             }
             _ => false,
         }
@@ -2544,6 +2556,12 @@ impl<'a> Checker<'a> {
     /// An argument to a JavaScript function: arrows get `Js` parameters (and return `Js`).
     fn js_arg(&mut self, a: &Arg) {
         let x = a.expr;
+        if let ExprKind::Arrow(f) = &self.ast().expr(x).kind
+            && f.is_async
+            && let Some(facts) = self.facts_mut()
+        {
+            facts.js_async_roots.insert(x);
+        }
         let exp = match &self.ast().expr(x).kind {
             ExprKind::Arrow(f) => {
                 let n = f.params.len();
@@ -2553,7 +2571,9 @@ impl<'a> Checker<'a> {
                     crate::ast::ArrowBody::Block(b) if !super::returns_value(self.ast(), b) => VOID,
                     _ => JS,
                 };
-                Some(self.types.func(ps, ret))
+                // (it may pass errors on: they're thrown into JavaScript)
+                let err = self.error_class();
+                Some(self.types.func_throws(ps, ret, err))
             }
             _ => Some(JS),
         };
@@ -2565,6 +2585,17 @@ impl<'a> Checker<'a> {
                 Diagnostic::new("T0901", s, format!("a `{shown}` can't be passed to JavaScript"))
                     .note("why", "values are converted for JavaScript: numbers, strings, booleans, `undefined`, arrays, records, `Js` values, and functions taking `Js`"),
             );
+        }
+    }
+
+    /// A JavaScript property read (a getter or a Proxy can throw). Marked `try`, it passes a
+    /// `JsError` on like a JavaScript call; unmarked, a throw inside a function called from
+    /// JavaScript goes back to JavaScript, and anywhere else it's a trap.
+    fn js_read(&mut self, e: ExprId, span: Span) {
+        let marked = self.fcx.last().and_then(|f| f.frames.last()).is_some_and(|f| f.try_expr > 0);
+        if marked {
+            let err = self.builtin_class("JsError");
+            self.on_throw(err, span, None, Some(e));
         }
     }
 

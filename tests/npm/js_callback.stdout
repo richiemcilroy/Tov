@@ -1,0 +1,27 @@
+caught Error: bang-method (the thrown object)
+caught Error: bang-method (the thrown object)
+caught Refused: tov-side
+returned 7
+caught Error: bang-method (the thrown object)
+returned inner caught Error: bang-method (the thrown object)
+caught Error: boom-getter (the thrown object)
+caught Error: boom-getter (the thrown object)
+caught Error: boom-getter (the thrown object)
+returned inner caught Error: boom-getter (the thrown object)
+returned 7
+middle before
+caught Error: boom-getter (the thrown object)
+caught Error: boom-getter (the thrown object)
+caught Error: boom-getter (the thrown object)
+caught Error: boom-getter (the thrown object)
+caught Error: boom-getter (the thrown object)
+returned tov caught Error: boom-getter
+returned 7
+caught Error: boom-getter (the thrown object)
+caught Error: boom-getter (the thrown object)
+caught Error: bang-method (the thrown object)
+caught Refused: async tov-side
+/ok 200 7
+/boom 500 bang-method
+/params 500 boom-getter
+/ok 200 7

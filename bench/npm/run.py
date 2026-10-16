@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""npm packages from Tov against Bun: startup, a call-heavy loop, an HTTP service, binary size and
-build time. Run `bun install` here first (zod). Interleaves Tov and Bun per repetition and
+"""npm packages from Tov against Bun: startup, a call-heavy loop (each way), an HTTP service, binary
+size and build time. Run `bun install` here first (zod). Interleaves Tov and Bun per repetition and
 reports medians.
 
   bench/npm/run.py [--repeat N]
@@ -77,7 +77,7 @@ def main():
     subprocess.run(["cargo", "build", "-q", "--release"], cwd=ROOT, check=True)
     sh(["cc", "-O2", "-o", LOAD, os.path.join(ROOT, "bench", "http", "load.c"), "-lpthread"])
     builds = {}
-    for name in ("startup", "loop", "service"):
+    for name in ("startup", "loop", "callback", "service"):
         src = os.path.join(HERE, f"{name}.tov")
         exe = os.path.join(OUT, name)
         sh([TOV, "build", src, "-o", exe])
@@ -105,6 +105,11 @@ def main():
         loops[0].append(int(sh([os.path.join(OUT, "loop")], cwd=HERE).split()[1]))
         loops[1].append(int(sh(["bun", "--no-install", "loop.js"], cwd=HERE).split()[1]))
     rows["1M zod calls (ms)"] = (statistics.median(loops[0]), statistics.median(loops[1]))
+    calls = ([], [])
+    for _ in range(a.repeat):
+        calls[0].append(int(sh([os.path.join(OUT, "callback")], cwd=HERE).split()[1]))
+        calls[1].append(int(sh(["bun", "--no-install", "callback.js"], cwd=HERE).split()[1]))
+    rows["1M calls into Tov (ms)"] = (statistics.median(calls[0]), statistics.median(calls[1]))
     svc = ([], [])
     for _ in range(a.repeat):
         svc[0].append(service([os.path.join(OUT, "service")], 39181))

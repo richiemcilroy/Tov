@@ -1,0 +1,14 @@
+// A JavaScript call into an async Tov function must not leave the unwind channel's flag set: a
+// function entered afterwards, not through JavaScript, whose read throws, is still a trap.
+import { EventEmitter } from "node:events"
+
+function main() {
+  const events = try new EventEmitter()
+  try events.on("go", async (o: Js): Promise<Js> => o)
+  try events.emit("go", 1)
+  // called through a value, from Tov: no JavaScript caller to send the exception to
+  const read = (o: Js): Js => o.missing.deep
+  console.log("before")
+  console.log(read({}))
+  console.log("never: the exception was swallowed")
+}

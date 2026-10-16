@@ -1,0 +1,37 @@
+// `tov test` with Tov functions called from JavaScript (EventEmitter listeners): inside a test,
+// a JavaScript exception still goes back to its JavaScript caller (not to the test runner), a
+// trap fails only its own test, and the tests after it run as usual.
+import { EventEmitter } from "node:events"
+
+test("a JavaScript exception goes back to JavaScript", () => {
+  const events = try new EventEmitter()
+  try events.on("read", (o: Js): Js => o.missing.deep)
+  let caught = ""
+  try {
+    try events.emit("read", {})
+  } catch (e) {
+    caught = e.name
+  }
+  expect(caught).toBe("TypeError")
+})
+
+test("a trap in a listener fails its test", () => {
+  const events = try new EventEmitter()
+  try events.on("overflow", (n: Js): Js => {
+    const big: int = 9223372036854775807
+    return big + 1
+  })
+  try events.emit("overflow", 1)
+})
+
+test("the next test runs, and JavaScript calls still work", () => {
+  const events = try new EventEmitter()
+  try events.on("read", (o: Js): Js => o.missing.deep)
+  let caught = ""
+  try {
+    try events.emit("read", {})
+  } catch (e) {
+    caught = e.name
+  }
+  expect(caught).toBe("TypeError")
+})

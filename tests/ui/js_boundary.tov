@@ -1,0 +1,41 @@
+// Functions handed to JavaScript: what the checker accepts at the boundary, and what it refuses.
+
+class Refused extends Error {}
+
+function throwing(ctx: Js): Js {
+  return try ctx.boom()
+}
+
+async function later(ctx: Js): Promise<Js> {
+  return ctx.ok
+}
+
+function apply(f: (x: Js) => Js, x: Js): Js {
+  return f(x)
+}
+
+export function accepted(lib: Js): void throws JsError {
+  // a function may pass errors on to JavaScript: they're thrown there
+  try lib.run((ctx: Js) => try ctx.boom())
+  try lib.run(throwing)
+  try lib.run((ctx: Js): Js => { throw new Refused("no") })
+  // async functions: JavaScript gets a promise
+  try lib.run(async (ctx: Js): Promise<Js> => ctx.ok)
+  try lib.run(later)
+  // the same through a variable: its type says what it can throw
+  const h: (ctx: Js) => Js throws JsError = (ctx: Js) => try ctx.boom()
+  try lib.run(h)
+  const plain = (ctx: Js): Js => ctx.ok
+  try lib.run(plain)
+  // a read marked `try` can fail like a call (a getter that throws)
+  const p = try lib.params
+  const n = try lib["name"]
+}
+
+export function refused(lib: Js): void throws JsError {
+  // only `Js` parameters and values JavaScript can hold cross the boundary
+  try lib.run((n: int) => n)
+  try lib.run((ctx: Js) => new Map<string, int>())
+  // a closure whose type can't throw can't pass a read's error on
+  const v = apply((x: Js) => try x.params, lib)
+}

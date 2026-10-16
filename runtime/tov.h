@@ -32,6 +32,18 @@ typedef int64_t tv_int;
 /* ------------------------------------------------------------------ traps */
 
 _Noreturn void tv_trap(const char *msg, const char *loc);
+/* The innermost JavaScript-to-Tov call that can catch a JavaScript exception (runtime/js.c's
+ * tv_js_unwind; NULL when none can). Tov's own scheduler clears it while it runs Tov code, so an
+ * exception there is never sent to a JavaScript call it isn't running under. */
+extern void *tv_js_unwind_top;
+/* The unwind channel (crates/tov/src/codegen/unwind.rs): set just before a call through it
+ * (taken by the callee first thing), and the JavaScript exception on its way back up. */
+extern bool tv_js_direct;
+extern void *tv_js_pending;
+/* (set by runtime/js.c) A test failing inside Tov code that JavaScript called: back to that
+ * JavaScript call as an exception, rather than a jump to the test runner over the engine's
+ * frames; the test fails all the same. */
+extern void (*tv_js_test_fail)(const char *msg);
 void *tv_alloc(size_t size);          /* traps on out-of-memory */
 void tv_write_fd(int fd, const char *s, size_t n); /* all of s to fd 1 or 2, unbuffered */
 void tv_err_cstr(const char *s);                     /* to stderr */

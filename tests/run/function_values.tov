@@ -1,0 +1,39 @@
+// Functions used as values pass their errors on, as direct calls do.
+
+class Big extends Error {}
+
+function declared(x: int): int throws Big {
+  if (x > 1) {
+    throw new Big("big")
+  }
+  return x
+}
+
+function inferred(x: int): int {
+  if (x > 1) {
+    throw new Big(`too big: ${x}`)
+  }
+  return x
+}
+
+function through(f: (x: int) => int throws Big, x: int): int throws Big {
+  return try f(x)
+}
+
+function main() {
+  const fs = [declared, inferred]
+  for (const f of fs) {
+    try {
+      console.log("ok", try through(f, 1))
+      console.log("unreachable", try through(f, 5))
+    } catch (e) {
+      console.log("caught", e.message)
+    }
+  }
+  const h = declared
+  try {
+    console.log(try h(5))
+  } catch (e) {
+    console.log("caught", e.message)
+  }
+}

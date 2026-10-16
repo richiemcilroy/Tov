@@ -1,0 +1,24 @@
+// A Tov function called from JavaScript (an EventEmitter listener): a JavaScript exception in it
+// goes back to JavaScript, but a Tov bug in it (integer overflow) is still a trap, which no
+// `catch` sees.
+import { EventEmitter } from "node:events"
+
+function main() {
+  const events = try new EventEmitter()
+  try events.on("read", (o: Js): Js => o.missing.deep)
+  try events.on("overflow", (n: Js): Js => {
+    const big: int = 9223372036854775807
+    return big + 1
+  })
+  try {
+    try events.emit("read", {})
+  } catch (e) {
+    console.log("caught", e.name)
+  }
+  try {
+    try events.emit("overflow", 1)
+    console.log("never: emit returned")
+  } catch (e) {
+    console.log("never: caught", e.name)
+  }
+}

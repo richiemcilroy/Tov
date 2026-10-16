@@ -36,11 +36,29 @@ int tv_argc;
 char **tv_argv;
 
 static jmp_buf *tv_test_jmp;       /* non-NULL while a test is running */
+void *tv_js_unwind_top;
+bool tv_js_direct;
+void *tv_js_pending;
 /* Unwinds to the running test (set by tv_test_run, so programs without tests don't link longjmp). */
 void (*tv_test_unwind)(void); /* not static: the compiler would call its only value directly */
 static tv_sb tv_test_msg;          /* failure message of the running test */
 static const char *tv_test_loc;
 static int64_t tv_tests_passed, tv_tests_failed;
+void (*tv_js_test_fail)(const char *msg);
+static bool tv_test_failed_now;   /* the running test has failed (its first failure is kept) */
+
+/* The running test fails: to the test runner, or first back out of the JavaScript calls it's
+ * inside (tv_js_test_fail), which leaves to Tov code whose error paths reach the runner. */
+static _Noreturn void tv_test_fail_now(void) {
+    tv_test_failed_now = true;
+    if (tv_js_unwind_top && tv_js_test_fail) {
+        tv_sb_push_char(&tv_test_msg, 0);
+        tv_test_msg.len--;
+        tv_js_test_fail(tv_test_msg.data);
+    }
+    tv_test_unwind();
+    abort();
+}
 
 /* ================================================================== traps and memory */
 
@@ -80,11 +98,13 @@ static _Noreturn void tv_oom(size_t size) {
 
 _Noreturn void tv_trap(const char *msg, const char *loc) {
     if (tv_test_jmp) {
-        tv_test_msg.len = 0;
-        tv_sb_push_cstr(&tv_test_msg, "trap: ");
-        tv_sb_push_cstr(&tv_test_msg, msg);
-        tv_test_loc = loc;
-        tv_test_unwind();
+        if (!tv_test_failed_now) {
+            tv_test_msg.len = 0;
+            tv_sb_push_cstr(&tv_test_msg, "trap: ");
+            tv_sb_push_cstr(&tv_test_msg, msg);
+            tv_test_loc = loc;
+        }
+        tv_test_fail_now();
     }
     tv_out_flush();
     tv_err_cstr("trap: ");
@@ -2537,17 +2557,27 @@ static void tv_test_longjmp(void) { longjmp(*tv_test_jmp, 1); }
 
 void tv_test_run(const char *name, void (*fn)(void)) {
     jmp_buf jb;
+    void *unwind = tv_js_unwind_top;
     tv_test_jmp = &jb;
     tv_test_unwind = tv_test_longjmp;
     tv_sb sb = {0};
+    bool passed;
+    tv_test_failed_now = false;
     if (setjmp(jb) == 0) {
         fn();
-        tv_test_jmp = NULL;
+        /* (it failed inside a JavaScript call, and something on the way caught that) */
+        passed = !tv_test_failed_now;
+    } else {
+        passed = false;
+    }
+    tv_test_jmp = NULL;
+    tv_js_unwind_top = unwind;   /* (a failure may have left JavaScript calls inside the test) */
+    tv_test_failed_now = false;
+    if (passed) {
         tv_tests_passed++;
         tv_sb_push_cstr(&sb, "ok   ");
         tv_sb_push_cstr(&sb, name);
     } else {
-        tv_test_jmp = NULL;
         tv_tests_failed++;
         tv_sb_push_cstr(&sb, "FAIL ");
         tv_sb_push_cstr(&sb, name);
@@ -2571,10 +2601,14 @@ _Noreturn void tv_expect_fail(tv_sb *message, const char *loc) {
     }
     if (!msg.len) tv_sb_push_cstr(&msg, "expectation failed");
     if (tv_test_jmp) {
-        tv_sb_free(&tv_test_msg);
-        tv_test_msg = msg;
-        tv_test_loc = loc;
-        tv_test_unwind();
+        if (!tv_test_failed_now) {
+            tv_sb_free(&tv_test_msg);
+            tv_test_msg = msg;
+            tv_test_loc = loc;
+        } else {
+            tv_sb_free(&msg);
+        }
+        tv_test_fail_now();
     }
     tv_sb_push_char(&msg, 0);
     tv_trap(msg.data, loc);
@@ -3301,6 +3335,16 @@ static void tv_task_step(tv_task *t) {
     }
 }
 
+/* A task's first step, run where it's started: even started from a JavaScript call, the step is
+ * Tov's own, so an exception in it never jumps out past tv_task_step's bookkeeping (see
+ * tv_js_unwind_top). (A resumed step runs from the microtask queue, cleared there already.) */
+static void tv_task_first_step(tv_task *t) {
+    void *unwind = tv_js_unwind_top;
+    tv_js_unwind_top = NULL;
+    tv_task_step(t);
+    tv_js_unwind_top = unwind;
+}
+
 static void tv_resume_job(void *a, void *b) {
     (void)b;
     tv_task *t = a;
@@ -3319,11 +3363,11 @@ tv_promise *tv_task_spawn(tv_task *t) {
     tv_promise_retain(p);
     if (tv_spawn_tail) tv_spawn_tail = false;
     else t->flags |= TV_TASK_SYNC;
-    tv_task_step(t);
+    tv_task_first_step(t);
     return p;
 }
 
-void tv_task_start(tv_task *t) { tv_task_step(t); }
+void tv_task_start(tv_task *t) { tv_task_first_step(t); }
 
 void tv_task_yield(void) {
     if (!tv_cur_task) tv_trap("internal error: await outside a task", NULL);
@@ -3831,7 +3875,19 @@ static int tv_http_q;
 static void tv_http_loop(void);
 static void tv_http_refresh_date(void);
 
+static void tv_async_loop(void);
+
 void tv_async_run(void) {
+    /* (the loop runs Tov's own callbacks, the microtask queue's jobs among them: no JavaScript
+     * call catches what they throw. Every drain of the queue is inside it, so the queue itself
+     * needn't clear the stack, which would cost the hot path.) */
+    void *unwind = tv_js_unwind_top;
+    tv_js_unwind_top = NULL;
+    tv_async_loop();
+    tv_js_unwind_top = unwind;
+}
+
+static void tv_async_loop(void) {
     for (;;) {
         tv_run_microtasks();
         /* while servers run, their loop runs the timers too */
