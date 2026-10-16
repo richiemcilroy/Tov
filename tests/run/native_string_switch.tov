@@ -1,0 +1,26 @@
+// A switch over a string variable leaves the string's reference count as it found it, whichever
+// way control leaves the switch (a case that returns, one that breaks, no case matching).
+function classify(tokIn: string): int {
+  let tok = tokIn
+  if (tok.startsWith("-")) tok = tok.slice(1)
+  switch (tok) {
+    case "flex": return 1
+    case "row": return 2
+    case "col": break
+    default: break
+  }
+  return tok.byteLength
+}
+
+function main(): void {
+  const parts = ["flex-grow", "-flex", "-row", "-col", "-other", "-another-token"]
+  let total = 0
+  for (let round = 0; round < 50; round++) {
+    for (let k = 0; k < parts.length; k++) total += classify(parts[k]!)
+    // churn the allocator so a string freed too early is reused and overwritten
+    const churn: string[] = []
+    for (let k = 0; k < 20; k++) churn.push(`filler ${round} ${k} ${total}`)
+  }
+  console.log(total)
+  console.log(parts.join(","))
+}

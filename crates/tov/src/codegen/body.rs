@@ -1668,12 +1668,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 if result.0.is_none() {
                     // General: keep the value for the if-chain.
-                    let v = self.own(v);
-                    let ct = self.ctype(v.ty);
+                    // The discriminant owns one reference for the whole switch and is released with the enclosing scope (so `return` in a case
+                    // releases it too). It used to be an `own`ed temporary released by `pop_temps` AND released again after the chain: a string
+                    // switched over was freed twice whenever control left through the end of the switch.
+                    let ty = v.ty;
+                    let code = self.consume(v);
+                    let ct = self.ctype(ty);
                     let dv = self.fresh("d");
-                    self.line(format!("{ct} {dv} = {};", v.code));
+                    self.line(format!("{ct} {dv} = {code};"));
                     self.pop_temps();
-                    self.if_chain_switch(&dv, v.ty, cases, v.owned);
+                    if self.is_rc(ty) {
+                        let rel = format!("{};", self.release_code(ty, &dv));
+                        self.b().scopes.last_mut().unwrap().releases.push(rel);
+                    }
+                    self.if_chain_switch(&dv, ty, cases, false);
                     return;
                 }
             }
