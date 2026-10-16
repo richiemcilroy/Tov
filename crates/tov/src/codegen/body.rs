@@ -1613,7 +1613,9 @@ impl<'c, 'a> Gen<'c, 'a> {
     fn loop_body(&mut self, body: StmtId, cont: &str) {
         self.push_scope();
         let depth = self.b().scopes.len();
-        self.b().loops.push((cont.to_string(), depth));
+        // `continue` jumps to a label placed after the body scope was released, so it must release that scope itself (like `break`, depth - 1):
+        // otherwise the refcounted locals of the body leak on every `continue`.
+        self.b().loops.push((cont.to_string(), depth - 1));
         self.b().breaks.push((BreakTarget::Native, depth - 1));
         let m = self.cur_m();
         if let StmtKind::Block(ss) = &self.ast(m).stmt(body).kind {

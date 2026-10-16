@@ -1,0 +1,58 @@
+// `continue` releases the refcounted locals of the loop body, as reaching the end of the body does:
+// a weak reference to an object made in an iteration reads undefined once the iteration is over,
+// whichever way it ended (for, for-of and while loops).
+class Box {
+  n: int = 0
+}
+
+class Probe {
+  weak target: Box | undefined = undefined
+}
+
+function fresh(count: int): Probe[] {
+  const probes: Probe[] = []
+  for (let k = 0; k < count; k++) probes.push(new Probe())
+  return probes
+}
+
+function report(name: string, probes: Probe[]): void {
+  let out = name
+  for (let k = 0; k < probes.length; k++) out += probes[k]!.target === undefined ? " freed" : " alive"
+  console.log(out)
+}
+
+function main(): void {
+  const a = fresh(4)
+  for (let k = 0; k < 4; k++) {
+    const b = new Box()
+    b.n = k
+    a[k]!.target = b
+    if (k % 2 === 1) continue
+    b.n += 1
+  }
+  report("for", a)
+
+  const b = fresh(4)
+  const items = [0, 1, 2, 3]
+  for (const k of items) {
+    const box = new Box()
+    box.n = k
+    b[k]!.target = box
+    if (k % 2 === 1) continue
+    box.n += 1
+  }
+  report("for-of", b)
+
+  const c = fresh(4)
+  let i = 0
+  while (i < 4) {
+    const k = i
+    i++
+    const box = new Box()
+    box.n = k
+    c[k]!.target = box
+    if (k % 2 === 1) continue
+    box.n += 1
+  }
+  report("while", c)
+}
