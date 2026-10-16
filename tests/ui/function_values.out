@@ -1,0 +1,20 @@
+error[T0831] function_values.tov:22:10: `d` can throw `Big`; mark the call `try` to pass the error on, or catch it
+   22 |   return d(1) + i(1)
+  why: errors are values in Tov: every call that can fail is marked, so control flow is visible
+  or: wrap it in `try { ... } catch (e) { ... }`
+  fix[safe]: pass it on: `try d(1)`
+
+error[T0831] function_values.tov:22:17: `i` can throw `Big`; mark the call `try` to pass the error on, or catch it
+   22 |   return d(1) + i(1)
+  why: errors are values in Tov: every call that can fail is marked, so control flow is visible
+  or: wrap it in `try { ... } catch (e) { ... }`
+  fix[safe]: pass it on: `try i(1)`
+
+error[T0303] function_values.tov:40:17: `countdown` is recursive, so it needs an explicit return type
+   40 |   const again = countdown
+
+error[T0001] function_values.tov:61:16: expected `(int) => int`, found `(int) => int throws Big`
+   61 |   return apply(declared, 1)
+  context: argument `f` of `apply`
+
+4 error(s)

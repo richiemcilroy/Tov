@@ -49,6 +49,7 @@
 #endif
 
 JSGlobalContextRef tv_js_ctx;
+static _Noreturn void tv_js_test_fail_fn(const char *msg);
 bool tv_js_encoded;
 /* runtime/napi.c (native addons), in programs whose bundle holds one: it sets this */
 void (*tv_js_napi_install)(JSContextRef ctx);
@@ -956,6 +957,7 @@ JSContextRef tv_js_start(void) {
         if (set[i]) unsetenv(options[i][0]);
     tv_js_trace_phase("created the JavaScript context", t0);
     tv_js_ctx = ctx;
+    tv_js_test_fail = tv_js_test_fail_fn;
     if (getenv("TOV_JS_PROFILE") && JSContextGroupEnableSamplingProfiler && JSContextGroupEnableSamplingProfiler(JSContextGetGroup(ctx)))
         atexit(tv_js_profile_write);
 #ifdef TV_JSC_OWN
@@ -1442,6 +1444,40 @@ void tv_js_settle(tv_js_deferred *d, JSValueRef value, bool ok) {
     tv_free(d);
 }
 
+/* A Tov promise as a JavaScript one (a Tov async function called from JavaScript): settled
+ * when the Tov promise is, with its value converted by `value`, or rejected with `err(error)`
+ * (the error stays the promise's). */
+typedef struct {
+    tv_js_deferred *d;
+    tv_promise *p;
+    JSValueRef (*value)(const void *);
+    JSValueRef (*err)(void *);
+} tv_js_promise_link;
+
+static void tv_js_promise_settled(void *a, void *b) {
+    (void)b;
+    tv_js_promise_link *l = a;
+    tv_promise *p = l->p;
+    if (p->state == TV_FULFILLED) {
+        tv_js_settle(l->d, l->value(p->value), true);
+    } else {
+        tv_js_settle(l->d, l->err(p->err), false);
+    }
+    tv_promise_release(p);
+    tv_free(l);
+}
+
+JSValueRef tv_js_promise_of(tv_promise *p, JSValueRef (*value)(const void *), JSValueRef (*err)(void *)) {
+    tv_js_promise_link *l = tv_alloc(sizeof *l);
+    JSObjectRef jp = tv_js_deferred_new(&l->d);
+    l->p = p;
+    l->value = value;
+    l->err = err;
+    tv_promise_retain(p);
+    tv_promise_on(p, tv_js_promise_settled, l, NULL);
+    return jp;
+}
+
 /* tv_js_await: the two reactions passed to `then` share one record. */
 typedef struct {
     tv_promise *p;      /* settled by the first reaction to run (held) */
@@ -1532,7 +1568,32 @@ void tv_js_error_parts(JSValueRef exc, tv_str *name, tv_str *message) {
     *message = tv_js_to_str(exc);
 }
 
+/* (not a root: nothing allocates between the store and the trampoline handing it to the
+ * engine, so the collector can't run while only this holds it) */
+JSValueRef tv_js_unwind_exc;
+
+/* (tv_js_test_fail) a failing test inside a JavaScript call: an Error with its message, thrown
+ * into that call's JavaScript caller (tv_js_unwind). Only called with a catch point there:
+ * tv_test_fail_now checks tv_js_unwind_top first. */
+static _Noreturn void tv_js_test_fail_fn(const char *msg) {
+    if (!tv_js_unwind_top) abort();
+    JSContextRef ctx = tv_js_ctx;
+    JSValueRef m = tv_js_str(msg, strlen(msg));
+    JSValueRef failed = NULL;
+    JSObjectRef e = JSObjectMakeError(ctx, 1, &m, &failed);
+    tv_js_unwind_exc = e ? (JSValueRef)e : m;
+    TV_JS_LONGJMP(((tv_js_unwind *)tv_js_unwind_top)->jb);
+}
+
+/* An uncaught JavaScript exception: into the JavaScript caller of the Tov code it's in (see
+ * tv_js_unwind; every caller has returned from the engine call that raised it), else a trap. */
 static _Noreturn void tv_js_trap_exc(JSValueRef exc, const char *loc) {
+    /* (a failed engine call with no exception: still a value, so the caller can throw it) */
+    if (!exc) exc = JSValueMakeUndefined(tv_js_ctx);
+    if (tv_js_unwind_top) {
+        tv_js_unwind_exc = exc;
+        TV_JS_LONGJMP(((tv_js_unwind *)tv_js_unwind_top)->jb);
+    }
     tv_str text = tv_js_error_text(exc);
     tv_sb sb = {0};
     tv_sb_push_cstr(&sb, "uncaught JavaScript exception: ");
@@ -1574,28 +1635,38 @@ JSValueRef tv_js_get_or_trap(JSValueRef obj, tv_js_name *key, const char *loc) {
     return r;
 }
 
-JSValueRef tv_js_at_or_trap(JSValueRef obj, double i, const char *loc) {
+JSValueRef tv_js_at_exc(JSValueRef obj, double i, JSValueRef *exc) {
     JSContextRef ctx = tv_js();
-    JSValueRef exc = NULL;
-    JSObjectRef o = JSValueToObject(ctx, obj, &exc);
-    if (!o) tv_js_trap_exc(exc, loc);
+    JSObjectRef o = JSValueToObject(ctx, obj, exc);
+    if (!o) return NULL;
     JSValueRef r;
     if (i >= 0 && i < 4294967295.0 && i == (double)(uint32_t)i) {
-        r = JSObjectGetPropertyAtIndex(ctx, o, (unsigned)i, &exc);
+        r = JSObjectGetPropertyAtIndex(ctx, o, (unsigned)i, exc);
     } else {
-        r = JSObjectGetPropertyForKey(ctx, o, JSValueMakeNumber(ctx, i), &exc);
+        r = JSObjectGetPropertyForKey(ctx, o, JSValueMakeNumber(ctx, i), exc);
     }
-    if (exc) tv_js_trap_exc(exc, loc);
+    return *exc ? NULL : r;
+}
+
+JSValueRef tv_js_at_or_trap(JSValueRef obj, double i, const char *loc) {
+    JSValueRef exc = NULL;
+    JSValueRef r = tv_js_at_exc(obj, i, &exc);
+    if (!r) tv_js_trap_exc(exc, loc);
     return r;
 }
 
-JSValueRef tv_js_key_or_trap(JSValueRef obj, tv_str key, const char *loc) {
+JSValueRef tv_js_key_exc(JSValueRef obj, tv_str key, JSValueRef *exc) {
     JSContextRef ctx = tv_js();
+    JSObjectRef o = JSValueToObject(ctx, obj, exc);
+    if (!o) return NULL;
+    JSValueRef r = JSObjectGetPropertyForKey(ctx, o, tv_js_from_str(key), exc);
+    return *exc ? NULL : r;
+}
+
+JSValueRef tv_js_key_or_trap(JSValueRef obj, tv_str key, const char *loc) {
     JSValueRef exc = NULL;
-    JSObjectRef o = JSValueToObject(ctx, obj, &exc);
-    if (!o) tv_js_trap_exc(exc, loc);
-    JSValueRef r = JSObjectGetPropertyForKey(ctx, o, tv_js_from_str(key), &exc);
-    if (exc) tv_js_trap_exc(exc, loc);
+    JSValueRef r = tv_js_key_exc(obj, key, &exc);
+    if (!r) tv_js_trap_exc(exc, loc);
     return r;
 }
 
@@ -1652,9 +1723,21 @@ static void tv_js_release_dead(void) {
 }
 
 static JSValueRef tv_js_closure_call(JSContextRef ctx, JSObjectRef f, JSObjectRef self, size_t n, const JSValueRef a[], JSValueRef *exc) {
-    (void)ctx; (void)self; (void)exc;
+    (void)ctx; (void)self;
     tv_js_closure *c = JSObjectGetPrivate(f);
-    return c->tramp(&c->fn, n, a);
+    return c->tramp(&c->fn, n, a, exc);
+}
+
+JSValueRef tv_js_error_value(tv_str name, tv_str message) {
+    JSContextRef ctx = tv_js();
+    JSValueRef m = tv_js_from_str(message);
+    JSValueRef failed = NULL;
+    JSObjectRef e = JSObjectMakeError(ctx, 1, &m, &failed);
+    /* (an exception must be a value: if the Error can't be made, its message is thrown) */
+    if (!e) return m;
+    static JSStringRef kname;
+    JSObjectSetProperty(ctx, e, tv_js_key(&kname, "name"), tv_js_from_str(name), kJSPropertyAttributeDontEnum, NULL);
+    return e;
 }
 
 static void tv_js_closure_finalize(JSObjectRef f) {

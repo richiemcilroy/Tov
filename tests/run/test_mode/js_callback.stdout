@@ -1,0 +1,6 @@
+ok   a JavaScript exception goes back to JavaScript
+FAIL a trap in a listener fails its test
+  trap: integer overflow in +
+  at tests/run/test_mode/js_callback.tov:22:12
+ok   the next test runs, and JavaScript calls still work
+2 passed, 1 failed

@@ -142,7 +142,7 @@ const r = try User.safeParse({ name: "Ada", age: 36 })
 console.log(r.success as bool)
 ```
 
-Tov code compiles to native code. The packages are bundled when the program is built (resolved as Node.js resolves them; ES modules, TypeScript and JSX converted), embedded in the binary, and run on JavaScriptCore, the engine Bun uses. Values that come from JavaScript have the type `Js` and are checked when converted (`as bool`), and JavaScript calls that can throw are marked `try` like any other.
+Tov code compiles to native code. The packages are bundled when the program is built (resolved as Node.js resolves them; ES modules, TypeScript and JSX converted), embedded in the binary, and run on JavaScriptCore, the engine Bun uses. Values that come from JavaScript have the type `Js` and are checked when converted (`as bool`), and JavaScript calls that can throw are marked `try` like any other. Tov functions handed to a package (a framework's handlers) can throw too: their errors, and JavaScript exceptions inside them, go back to the package as JavaScript exceptions, as they would in Bun.
 
 Node's built-in modules are there for packages that need them (`fs`, `http`, `net`, `child_process`, `crypto`, `zlib`, `dns`, streams and the rest), and so is Bun's (`Bun.serve`, `Bun.spawn`, `Bun.file`). Native addons load through Node-API. An app written for Bun runs as it is: this is the whole port of [Cap's media server](https://github.com/CapSoftware/Cap/tree/main/apps/media-server) (Hono, zod, FFmpeg through a native addon, `Bun.spawn`):
 

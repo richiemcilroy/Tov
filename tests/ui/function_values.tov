@@ -1,0 +1,62 @@
+// A function used as a value keeps its `throws`: calling it through the value is a marked call.
+
+class Big extends Error {}
+
+function declared(x: int): int throws Big {
+  if (x > 1) {
+    throw new Big("big")
+  }
+  return x
+}
+
+function inferred(x: int): int {
+  if (x > 1) {
+    throw new Big("big")
+  }
+  return x
+}
+
+function calls(): int {
+  const d = declared
+  const i = inferred
+  return d(1) + i(1)
+}
+
+function marked(): int throws Big {
+  const d = declared
+  const i = inferred
+  return try d(1) + try i(1)
+}
+
+// a function taking its own value while its `throws` is still being inferred: refused (the
+// same whatever order functions are checked in); with `throws` declared, it's a value
+function countdown(n: int): int {
+  if (n > 3) {
+    throw new Big("big")
+  }
+  if (n === 0) {
+    return 0
+  }
+  const again = countdown
+  return again(n - 1)
+}
+
+function countdownDeclared(n: int): int throws Big {
+  if (n > 3) {
+    throw new Big("big")
+  }
+  if (n === 0) {
+    return 0
+  }
+  const again = countdownDeclared
+  return try again(n - 1)
+}
+
+// a throwing function passed where a non-throwing function type is expected
+function apply(f: (x: int) => int, x: int): int {
+  return f(x)
+}
+
+function passed(): int {
+  return apply(declared, 1)
+}

@@ -20,6 +20,7 @@ pub(crate) mod class;
 mod iface;
 mod js;
 mod json;
+mod unwind;
 
 use crate::ast::{self, ExprId, ExprKind, ItemKind, StmtKind};
 use crate::check::{Callee, Checker, IdentFact, ModuleFacts};
@@ -246,6 +247,15 @@ pub(crate) struct Gen<'c, 'a> {
     /// The program calls fetch(): main installs TLS (and the build links it).
     uses_tls: bool,
     pub(crate) frame_defs: Vec<asyncfn::FrameDef>,
+    /// The program imports npm packages (its Tov code can be called from JavaScript).
+    pub(crate) npm: bool,
+    /// Module functions that can leave through the unwind channel (see `unwind.rs`).
+    pub(crate) unwinding: Option<FxSet<(u32, u32)>>,
+    /// The body `function_body` emits next is on the unwind channel (it takes `tv_js_direct`).
+    pub(crate) pending_aware: bool,
+    /// The async body `function_body` emits next is an async arrow passed to JavaScript: its
+    /// uncaught JavaScript exceptions reject its promise (see `unwind.rs`).
+    pub(crate) pending_root: bool,
 }
 
 // Helper kinds for `helpers_done`.
@@ -260,6 +270,7 @@ const H_REJECT: u8 = 7;
 
 impl<'c, 'a> Gen<'c, 'a> {
     fn new(c: &'c mut Checker<'a>) -> Self {
+        let npm = c.modules.iter().any(|m| m.npm.is_some());
         Gen {
             c,
             typedefs: String::new(),
@@ -322,6 +333,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             uses_tls: false,
             frame_defs: Vec::new(),
             js: js::JsGen::default(),
+            npm,
+            unwinding: None,
+            pending_aware: false,
+            pending_root: false,
         }
     }
 
@@ -1496,6 +1511,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             let _ = writeln!(self.funcs, "static {lproto} {{\n{lcode}}}\n");
             self.pending_tre = Some(body::Tre { entry: Some(looper), ..t });
         }
+        // (every function of an npm program takes the flag, so it's never left set)
+        self.pending_aware = self.npm;
         let code = self.function_body(inst.m, inst.subst.clone(), &params, ret, body::FnBodyKind::Block(f.body), Some(entry_unique), None, None);
         let _ = writeln!(self.funcs, "static {proto} {{\n{code}}}\n");
     }

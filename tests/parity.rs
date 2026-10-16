@@ -1,6 +1,8 @@
 //! Bun parity: serves tests/parity/server.ts with `bun` (NODE_ENV=production) and its Tov
 //! port tests/parity/server.tov.ts natively, sends both the same requests in the same order,
-//! and compares status, body and the headers a client would act on. Skipped without `bun`.
+//! and compares status, body and the headers a client would act on. The same for
+//! framework.ts: an app whose handlers a JavaScript framework calls (issue #20). Skipped
+//! without `bun`.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -73,21 +75,7 @@ fn main() {
         println!("parity: skipped (bun not found)");
         return;
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
-    let dir = root.join("tests/parity");
-    let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O2".into(), emit_c: None, symbols: false };
-    let built = match tov::build::build(&[dir.join("server.tov.ts")], &root, &opts) {
-        Ok(b) => b,
-        Err(tov::build::BuildError::Diagnostics(sm, d)) => panic!("build failed\n{}", tov::diag::render_text(&d, &sm)),
-        Err(tov::build::BuildError::Message(m)) => panic!("{m}"),
-    };
-    let (bp, np) = (free_port(), free_port());
-    let tov = start(Command::new(&built.binary), bp);
-    let mut bun_cmd = Command::new("bun");
-    bun_cmd.arg(dir.join("server.ts"));
-    let bun = start(bun_cmd, np);
-
-    let requests = [
+    let server = [
         get("/"),
         get("/health"),
         get("/todos"),
@@ -115,16 +103,69 @@ fn main() {
         get("/nope/deeper?x=1"),
         get("/health"),
     ];
+    // (each bad input is sent twice: the server is still there after the first)
+    let framework = [
+        get("/users/ada"),
+        get("/users/a"),
+        get("/users/a"),
+        get("/users/bob"),
+        get("/helper/ada"),
+        get("/helper/a"),
+        get("/guarded/ada"),
+        get("/guarded/a"),
+        get("/async/ada"),
+        get("/async/a"),
+        get("/async/a"),
+        get("/fail"),
+        get("/refused"),
+        get("/query?q=hi"),
+        get("/nope"),
+        get("/users/ada"),
+    ];
     let mut failed = 0;
-    for r in &requests {
-        let (a, b) = (send(tov.1, r), send(bun.1, r));
-        if a != b {
-            failed += 1;
-            eprintln!("FAIL {}\n  tov: {a:?}\n  bun:  {b:?}", r.lines().next().unwrap());
-        }
+    let mut total = 0;
+    for (name, requests) in [("server", &server[..]), ("framework", &framework[..])] {
+        let (n, f) = compare(name, requests);
+        total += n;
+        failed += f;
     }
-    println!("parity: {} requests, {failed} differ", requests.len());
+    println!("parity: {total} requests, {failed} differ");
     if failed > 0 {
         std::process::exit(1);
     }
+}
+
+/// Serves tests/parity/<name>.ts with Bun and <name>.tov.ts natively and sends both `requests`:
+/// (requests sent, how many answers differ).
+fn compare(name: &str, requests: &[String]) -> (usize, usize) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let dir = root.join("tests/parity");
+    let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O2".into(), emit_c: None, symbols: false };
+    let built = match tov::build::build(&[dir.join(format!("{name}.tov.ts"))], &root, &opts) {
+        Ok(b) => b,
+        Err(tov::build::BuildError::Diagnostics(sm, d)) => panic!("{name}: build failed\n{}", tov::diag::render_text(&d, &sm)),
+        Err(tov::build::BuildError::Message(m)) => panic!("{name}: {m}"),
+    };
+    let (bp, np) = (free_port(), free_port());
+    let tov = start(Command::new(&built.binary), bp);
+    let mut bun_cmd = Command::new("bun");
+    bun_cmd.arg(dir.join(format!("{name}.ts")));
+    let bun = start(bun_cmd, np);
+    let mut failed = 0;
+    for r in requests {
+        let (mut a, mut b) = (send(tov.1, r), send(bun.1, r));
+        if name == "framework" {
+            // (the framework builds its Responses in JavaScript, whose `content-type` charset
+            // parameter still differs from Bun's: `UTF-8` for `utf-8`, none on JSON; a separate
+            // gap from what this pair checks, which is who answers a handler's exception)
+            for x in [&mut a, &mut b] {
+                x.headers.retain(|(k, _)| k != "content-type");
+            }
+        }
+        if a != b {
+            failed += 1;
+            eprintln!("FAIL {name}: {}\n  tov: {a:?}\n  bun:  {b:?}", r.lines().next().unwrap());
+        }
+    }
+    (requests.len(), failed)
 }

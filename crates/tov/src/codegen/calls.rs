@@ -46,6 +46,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let t = self.inst(*t);
                     subst.insert(*p, t);
                 }
+                let arg_subst = subst.clone();
                 let cname = self.instance(fm, fi, subst);
                 if self.is_async_fn(fm, fi) {
                     let argv = self.args(args, &params, Some((fm, fi)));
@@ -60,6 +61,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                     argv.push(arr);
                 }
                 let ret = self.inst(fact.ret);
+                // through the unwind channel (`unwind.rs`): the arguments first, then the flag
+                if self.b().aware && self.unwinds(fm, fi) {
+                    for (i, p) in params.iter().enumerate().take(argv.len()) {
+                        if !p.inout {
+                            let pt = self.c.types.subst(p.ty, &arg_subst);
+                            argv[i] = self.tmp(pt, &argv[i], false).code;
+                        }
+                    }
+                    // (an async arrow passed to JavaScript is always on the channel)
+                    let aw = if self.b().root { "true" } else { "aw_" };
+                    let v = self.finish_call(&format!("(tv_js_direct = {aw}, {cname}({}))", argv.join(", ")), ret, ty);
+                    self.unwind_check();
+                    return v;
+                }
                 self.finish_call(&format!("{cname}({})", argv.join(", ")), ret, ty)
             }
             Callee::Value => {

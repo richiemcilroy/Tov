@@ -99,6 +99,9 @@ pub struct ModuleFacts {
     /// Module variables (module, item) this module changes: code generation treats them like
     /// heap values (arguments read from them are owned, since a call may change them).
     pub mutated_globals: crate::hash::FxSet<(u32, u32)>,
+    /// Async arrows passed to a JavaScript function: an uncaught JavaScript exception in one (or
+    /// in what it calls directly) rejects its promise (see codegen's `unwind.rs`).
+    pub js_async_roots: crate::hash::FxSet<ExprId>,
 }
 
 impl ModuleFacts {

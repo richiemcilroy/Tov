@@ -47,3 +47,22 @@ export class JsError extends Error {
 export function __jsError(name: string, message: string, value: Js): JsError {
   return new JsError(name, message, value)
 }
+
+/** (An error a Tov function passes on to JavaScript: a `JsError` goes back as what JavaScript
+ * threw; any other error as a JavaScript `Error` with its name and message. Called by generated
+ * code.) */
+export function __isJsError(e: Error): boolean {
+  return e instanceof JsError
+}
+
+export function __jsErrorValue(e: Error): Js {
+  return (e as JsError).value
+}
+
+export function __errorName(e: Error): string {
+  return e.name
+}
+
+export function __errorMessage(e: Error): string {
+  return e.message
+}

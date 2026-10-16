@@ -7,6 +7,7 @@ here first, then `bench/npm/run.py`.
 |---|---|
 | `startup` | start, load zod, validate one object, exit (wall time, median of 20) |
 | `loop` | a million `safeParse` calls, each with an object built for it: every call crosses from Tov into JavaScript, and each does little work (the bridge's worst case) |
+| `callback` | a million calls from a JavaScript loop into a Tov function (`loop`'s other direction: a framework calling a handler) |
 | `service` | an HTTP server validating each request's JSON body with zod (Tov's server against `Bun.serve`), driven by `bench/http`'s load generator (64 connections, 4 threads, 5 s) |
 
 How Tov runs npm code: the packages are bundled when the program is built (resolved like
@@ -15,6 +16,12 @@ build of JavaScriptCore (`scripts/jsc`; the engine Bun uses, linked into the pro
 module compiled when it's first required.
 Calls go through runtime/js.c: numbers, booleans and `undefined` cross without engine calls, and
 a JavaScript expression in Tov code (`User.safeParse({ name, age })`) compiles to one engine call.
+
+Measure on Tov's own engine (`scripts/jsc/build.sh`). Without it, Linux programs fall back to
+WebKitGTK's shared JavaScriptCore, where every crossing is slower and a JavaScript exception that
+reaches Tov costs about 95 µs (resolving its native stack against that library's symbol
+table), against about 1.4 µs for one thrown and caught inside JavaScript: error paths measured
+there look far worse than they are.
 
 ## Results
 
