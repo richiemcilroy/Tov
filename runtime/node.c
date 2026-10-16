@@ -2250,6 +2250,10 @@ static pid_t tv_node_spawn(const char *file, char **argv, char **env, const char
         for (int i = 0; i < nfds; i++) {
             if (child_fds[i] >= 0) posix_spawn_file_actions_adddup2(&fa, child_fds[i], i);
         }
+#ifndef POSIX_SPAWN_CLOEXEC_DEFAULT
+        /* (the child gets only its stdio, as POSIX_SPAWN_CLOEXEC_DEFAULT gives it on macOS) */
+        posix_spawn_file_actions_addclosefrom_np(&fa, nfds);
+#endif
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         if (cwd) posix_spawn_file_actions_addchdir_np(&fa, cwd);
