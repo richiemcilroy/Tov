@@ -5,7 +5,9 @@
 
 const { primordials } = require('internal/bootstrap');
 const { NumberIsInteger } = primordials;
-const { Writable, Readable } = require('stream');
+const { Writable } = require('stream');
+const { Socket } = require('net');
+const { TTY } = require('internal/bindings/tty_wrap');
 const { getColorDepth, hasColors } = require('internal/tty');
 
 const native = globalThis.__tov_native ?? require('internal/bootstrap/host_fallback');
@@ -41,6 +43,14 @@ class WriteStream extends Writable {
     return [this.columns, this.rows];
   }
 
+  // Tov's own: `sequence` is written to this terminal however the program ends (exit, an
+  // uncaught error, a trap, a fatal signal in raw mode), once; '' clears it. For a program
+  // that changes the terminal's state, such as entering the alternate screen.
+  setResetOnExit(sequence) {
+    const err = native.setResetOnExit(this.fd, String(sequence));
+    if (err < 0) throw new Error(`setResetOnExit: ${err === -25 ? 'not a terminal' : `error ${-err}`}`);
+  }
+
   getColorDepth(env) {
     return getColorDepth(env);
   }
@@ -66,9 +76,16 @@ class WriteStream extends Writable {
   }
 }
 
-class ReadStream extends Readable {
-  constructor(fd) {
-    super();
+class ReadStream extends Socket {
+  constructor(fd, options = {}) {
+    const ctx = {};
+    const handle = new TTY(fd, ctx);
+    if (ctx.code) {
+      const e = new Error('TTY initialization failed');
+      Object.assign(e, ctx);
+      throw e;
+    }
+    super({ ...options, handle, readable: true, writable: false, manualStart: true });
     this.fd = fd;
     this.isRaw = false;
     this.isTTY = true;
@@ -76,21 +93,15 @@ class ReadStream extends Readable {
 
   setRawMode(flag) {
     flag = !!flag;
-    if (native.setRawMode && native.setRawMode(this.fd, flag) !== 0) {
-      const e = new Error('setRawMode failed');
+    const err = this._handle.setRawMode(flag);
+    if (err) {
+      const e = new Error(`setRawMode: errno ${err}`);
       e.code = 'ERR_TTY_INIT_FAILED';
+      e.errno = err;
       throw e;
     }
     this.isRaw = flag;
     return this;
-  }
-
-  _read() {
-    if (!native.readFd) {
-      this.push(null);
-      return;
-    }
-    native.readFd(this.fd, (data) => this.push(data === null ? null : data));
   }
 }
 

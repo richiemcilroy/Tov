@@ -296,6 +296,25 @@ function stdioStream(fd) {
 }
 lazyProperty('stdout', () => stdioStream(1));
 lazyProperty('stderr', () => stdioStream(2));
-lazyProperty('stdin', () => (native.stdin ? native.stdin() : new (require('stream').Readable)({ read() { this.push(null); } })));
+lazyProperty('stdin', () => stdinStream(0));
+
+// stdio in: a pipe stream over the fd — pipes, files and /dev/null alike (the loop
+// reads it when the stream is flowing). A tty also gets Node's setRawMode for REPLs
+// and prompt libraries.
+function stdinStream(fd) {
+  if (native.isatty(fd)) {
+    const stream = new (require('tty').ReadStream)(fd);
+    stream._isStdio = true;
+    return stream;
+  }
+  const { Pipe, constants } = require('internal/bindings/pipe_wrap');
+  const handle = new Pipe(constants.SOCKET);
+  handle.open(fd);
+  const { Socket } = require('net');
+  const stream = new Socket({ handle, readable: true });
+  stream.fd = fd;
+  stream._isStdio = true;
+  return stream;
+}
 
 module.exports = process;
