@@ -145,7 +145,9 @@ static int tv_bio_read(BIO *b, char *out, int outl) {
     BIO_clear_retry_flags(b);
     if (outl <= 0) return 0;
     if (a->len > a->off) {
-        size_t n = a->len - a->off < (size_t)outl ? a->len - a->off : (size_t)outl;
+        size_t avail = a->len - a->off;
+        size_t n = avail < (size_t)outl ? avail : (size_t)outl;
+        if (n > avail) n = avail; /* never read past what a->buf actually holds */
         memcpy(out, a->buf + a->off, n);
         a->off += n;
         if (a->off == a->len) a->off = a->len = 0;
