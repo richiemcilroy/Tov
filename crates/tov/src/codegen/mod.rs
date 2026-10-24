@@ -26,7 +26,7 @@ mod json;
 mod range;
 mod resize;
 
-use crate::ast::{self, ExprId, ExprKind, ItemKind, StmtKind};
+use crate::ast::{self, ExprId, ExprKind, ItemKind, MemberKind, StmtKind};
 use crate::check::{Callee, Checker, IdentFact, ModuleFacts};
 use crate::diag::Diagnostic;
 use crate::hash::{FxMap, FxSet};
@@ -1907,21 +1907,41 @@ impl<'c, 'a> Gen<'c, 'a> {
     fn consts_read_by_called_fns(&self, m: u32, init: ExprId) -> Vec<(u32, u32)> {
         let mut exprs = Vec::new();
         body::collect_exprs_expr(self.ast(m), init, &mut exprs);
-        let mut work: Vec<(u32, u32)> = exprs.iter().filter_map(|&e| self.fn_named_by(m, e)).collect();
+        let mut work: Vec<CalledBody> = exprs.iter().flat_map(|&e| self.bodies_called_by(m, e)).collect();
         let mut seen = FxSet::default();
         let mut consts = Vec::new();
-        while let Some((fm, fi)) = work.pop() {
-            if !seen.insert((fm, fi)) {
+        while let Some(called) = work.pop() {
+            if !seen.insert(called) {
                 continue;
             }
-            let ast = self.ast(fm);
-            let ItemKind::Function(f) = &ast.items[fi as usize].kind else { continue };
             let mut exprs = Vec::new();
-            body::collect_exprs_stmt_pub(ast, f.body, &mut exprs);
+            let bm = match called {
+                CalledBody::Fn(fm, fi) => {
+                    let ast = self.ast(fm);
+                    let ItemKind::Function(f) = &ast.items[fi as usize].kind else { continue };
+                    body::collect_exprs_stmt_pub(ast, f.body, &mut exprs);
+                    fm
+                }
+                CalledBody::Member(c, member) => {
+                    let cm = self.c.classes[c as usize].module;
+                    body::collect_exprs_stmt_pub(self.ast(cm), self.c.member_fn(c, member).body, &mut exprs);
+                    cm
+                }
+                CalledBody::FieldInits(c) => {
+                    let cm = self.c.classes[c as usize].module;
+                    for member in &self.c.class_decl(c).members {
+                        if let MemberKind::Field { init: Some(init), .. } = &member.kind
+                            && !member.is_static
+                        {
+                            body::collect_exprs_expr(self.ast(cm), *init, &mut exprs);
+                        }
+                    }
+                    cm
+                }
+            };
             for e in exprs {
-                if let Some(g) = self.fn_named_by(fm, e) {
-                    work.push(g);
-                } else if let Some(IdentFact::Const(cm, ci)) = self.ident_fact(fm, e) {
+                work.extend(self.bodies_called_by(bm, e));
+                if let Some(IdentFact::Const(cm, ci)) = self.ident_fact(bm, e) {
                     consts.push((cm, ci));
                 }
             }
@@ -1929,11 +1949,52 @@ impl<'c, 'a> Gen<'c, 'a> {
         consts
     }
 
-    fn fn_named_by(&self, m: u32, e: ExprId) -> Option<(u32, u32)> {
-        match (self.ident_fact(m, e), self.facts(m).calls.get(&e).map(|c| &c.callee)) {
-            (Some(IdentFact::Fn(fm, fi)), _) | (_, Some(&Callee::Fn(fm, fi))) => Some((fm, fi)),
-            _ => None,
+    fn bodies_called_by(&self, m: u32, e: ExprId) -> Vec<CalledBody> {
+        if let Some(IdentFact::Fn(fm, fi)) = self.ident_fact(m, e) {
+            return vec![CalledBody::Fn(fm, fi)];
         }
+        let Some(call) = self.facts(m).calls.get(&e) else { return Vec::new() };
+        match call.callee {
+            Callee::Fn(fm, fi) => vec![CalledBody::Fn(fm, fi)],
+            Callee::StaticMethod(c, member) => vec![CalledBody::Member(c, member)],
+            Callee::New(c) => self
+                .class_and_ancestors(c)
+                .into_iter()
+                .flat_map(|c| {
+                    let ctors = self.c.class_decl(c).members.iter().enumerate()
+                        .filter(|(_, member)| matches!(member.kind, MemberKind::Constructor(_)))
+                        .map(move |(i, _)| CalledBody::Member(c, i as u32));
+                    ctors.chain([CalledBody::FieldInits(c)])
+                })
+                .collect(),
+            Callee::ClassMethod { recv, name, .. } => {
+                let Some((c, _)) = self.c.class_of(recv) else { return Vec::new() };
+                let mut classes = self.class_and_ancestors(c);
+                classes.extend((0..self.c.classes.len() as u32).filter(|&d| d != c && self.class_and_ancestors(d).contains(&c)));
+                classes
+                    .into_iter()
+                    .flat_map(|c| {
+                        self.c.class_decl(c).members.iter().enumerate()
+                            .filter(move |(_, member)| {
+                                member.name == name && !member.is_static && matches!(member.kind, MemberKind::Method(_))
+                            })
+                            .map(move |(i, _)| CalledBody::Member(c, i as u32))
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn class_and_ancestors(&self, c: u32) -> Vec<u32> {
+        let mut classes = vec![c];
+        while let Some(base) = self.c.classes[*classes.last().unwrap() as usize].base
+            && let Some((b, _)) = self.c.class_of(base)
+            && !classes.contains(&b)
+        {
+            classes.push(b);
+        }
+        classes
     }
 
     /// The C text of a module constant's initializer when it's a number or boolean literal
@@ -2380,3 +2441,10 @@ static inline tv_int tv_pow_int(tv_int b, tv_int e, const char *loc) {
 static inline double tv_min_f64(double a, double b) { return (a != a || b != b) ? (0.0 / 0.0) : (a < b ? a : (a > b ? b : (a == 0 && b == 0 ? (signbit(a) ? a : b) : a))); }
 static inline double tv_max_f64(double a, double b) { return (a != a || b != b) ? (0.0 / 0.0) : (a > b ? a : (a < b ? b : (a == 0 && b == 0 ? (signbit(a) ? b : a) : a))); }
 "#;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum CalledBody {
+    Fn(u32, u32),
+    Member(u32, u32),
+    FieldInits(u32),
+}
