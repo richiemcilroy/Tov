@@ -73,23 +73,26 @@ const IPV4 = /^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0
 const NUMBERISH = /^(0x|[0-9])/;
 const NUMBER = /^(0x[0-9a-f]*|[0-9]+)$/;
 const DOT_SEGMENT = /\/(\.|%2e){1,2}(\/|$)/i;
+const UPPER = /[A-Z]/;
 
 function fastParse(input) {
   if (input.length > 2048) return undefined;
   const m = FAST.exec(input);
   if (m === null) return undefined;
-  const scheme = m[1].toLowerCase();
+  let scheme = m[1];
+  if (UPPER.test(scheme)) scheme = scheme.toLowerCase();
   const defaultPort = DEFAULT_PORTS[scheme];
   if (defaultPort === undefined) return undefined;
-  const host = m[2].toLowerCase();
+  let host = m[2];
+  if (UPPER.test(host)) host = host.toLowerCase();
   // (a host that ends in a number is an IPv4 address: only the canonical form is as it reads)
-  const labels = host.split('.');
-  let last = labels[labels.length - 1];
-  if (last === '' && labels.length > 1) last = labels[labels.length - 2];
+  let end = host.length;
+  if (end > 1 && host.charCodeAt(end - 1) === 46) end--;
+  const last = host.slice(host.lastIndexOf('.', end - 1) + 1, end);
   if (last === '' || NUMBERISH.test(last) && NUMBER.test(last)) {
     if (!IPV4.test(host)) return undefined;
   }
-  if (host.includes('xn--')) return undefined;
+  if (host.length > 3 && host.includes('xn--')) return undefined;
   let port = null;
   if (m[3] !== undefined) {
     const n = +m[3];
@@ -97,7 +100,7 @@ function fastParse(input) {
     if (n !== defaultPort) port = n;
   }
   const path = m[4] ?? '/';
-  if (DOT_SEGMENT.test(path)) return undefined;
+  if ((path.includes('/.') || path.includes('%')) && DOT_SEGMENT.test(path)) return undefined;
   const query = m[5];
   const fragment = m[6];
   const c = urlComponents;
