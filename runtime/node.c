@@ -1501,6 +1501,16 @@ NATIVE(n_fs_write_utf8) {
 
 NATIVE(n_fs_exists) {
     UNUSED;
+    /* (a string path converted on the stack: apps check paths per request, Cap's media server
+     * ~16 cgroup files per probe) */
+    if (n > 0 && JSValueIsString(ctx, a[0])) {
+        JSStringRef s = JSValueToStringCopy(ctx, a[0], NULL);
+        char buf[1024];
+        bool fits = JSStringGetMaximumUTF8CStringSize(s) <= sizeof buf;
+        if (fits) JSStringGetUTF8CString(s, buf, sizeof buf);
+        JSStringRelease(s);
+        if (fits) return JSValueMakeBoolean(ctx, access(buf, F_OK) == 0);
+    }
     char *path = arg_path(ctx, n, a, 0);
     if (!path) return JSValueMakeBoolean(ctx, false);
     bool ok = access(path, F_OK) == 0;
