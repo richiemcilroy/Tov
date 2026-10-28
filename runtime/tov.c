@@ -162,54 +162,74 @@ static size_t tv_sb_map_size(size_t cap) {
 #include <os/lock.h>
 #define TV_SB_CACHE_MAX ((size_t)32 << 20)
 #define TV_SB_CACHE_SLOTS 8
-static struct { char *p; size_t size; } tv_sb_cache[TV_SB_CACHE_SLOTS];
+static struct { char *p; size_t size; uint64_t age; } tv_sb_cache[TV_SB_CACHE_SLOTS];
 static size_t tv_sb_cache_bytes;
 static os_unfair_lock tv_sb_cache_lock = OS_UNFAIR_LOCK_INIT;
 
+/* A cached mapping of `size` to `most` bytes, cut down to `size`, or NULL. (The smallest that
+ * fits; what's past `size` goes back.) */
+static char *tv_sb_cache_take(size_t size, size_t most) {
+    if (!tv_sb_cache_bytes) return NULL;
+    char *p = NULL;
+    size_t have = 0;
+    os_unfair_lock_lock(&tv_sb_cache_lock);
+    int best = -1;
+    for (int i = 0; i < TV_SB_CACHE_SLOTS; i++)
+        if (tv_sb_cache[i].p && tv_sb_cache[i].size >= size && tv_sb_cache[i].size <= most && (best < 0 || tv_sb_cache[i].size < tv_sb_cache[best].size)) best = i;
+    if (best >= 0) {
+        p = tv_sb_cache[best].p;
+        have = tv_sb_cache[best].size;
+        tv_sb_cache[best].p = NULL;
+        tv_sb_cache_bytes -= have;
+    }
+    os_unfair_lock_unlock(&tv_sb_cache_lock);
+    if (p && have > size) munmap(p + size, have - size);
+    return p;
+}
+
 static char *tv_sb_map(size_t cap) {
     size_t size = tv_sb_map_size(cap);
-    if (tv_sb_cache_bytes) {
-        /* (the smallest that's big enough, and not more than twice it: a buffer growing by
-         * doubling finds each of its sizes again, rather than cutting down the biggest; what's
-         * past `size` goes back) */
-        char *p = NULL;
-        size_t have = 0;
-        os_unfair_lock_lock(&tv_sb_cache_lock);
-        int best = -1;
-        for (int i = 0; i < TV_SB_CACHE_SLOTS; i++)
-            if (tv_sb_cache[i].p && tv_sb_cache[i].size >= size && tv_sb_cache[i].size <= 2 * size && (best < 0 || tv_sb_cache[i].size < tv_sb_cache[best].size)) best = i;
-        if (best >= 0) {
-            p = tv_sb_cache[best].p;
-            have = tv_sb_cache[best].size;
-            tv_sb_cache[best].p = NULL;
-            tv_sb_cache_bytes -= have;
-        }
-        os_unfair_lock_unlock(&tv_sb_cache_lock);
-        if (p) {
-            if (have > size) munmap(p + size, have - size);
-            return p;
-        }
-    }
+    /* (up to twice the size: a buffer growing by doubling finds each of its sizes again, rather
+     * than cutting down the biggest) */
+    char *c = tv_sb_cache_take(size, 2 * size);
+    if (c) return c;
     void *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (TV_UNLIKELY(p == MAP_FAILED)) tv_oom(cap);
     return (char *)p;
 }
 
-/* Unmaps `size` bytes at p (page-rounded, from tv_sb_map), or keeps them for reuse. */
+/* Unmaps `size` bytes at p (page-rounded, from tv_sb_map), or keeps them for reuse. A full
+ * cache makes room by unmapping its oldest: the sizes just freed are the ones about to be
+ * asked for again, and one that no longer fits anything would otherwise hold its place. */
 static void tv_sb_unmap(char *p, size_t size) {
+    char *drop[TV_SB_CACHE_SLOTS];
+    size_t drop_size[TV_SB_CACHE_SLOTS];
+    int ndrop = 0;
     if (size <= TV_SB_CACHE_MAX / 2) {
+        static uint64_t clock;
         os_unfair_lock_lock(&tv_sb_cache_lock);
-        if (tv_sb_cache_bytes + size <= TV_SB_CACHE_MAX)
-            for (int i = 0; i < TV_SB_CACHE_SLOTS; i++)
-                if (!tv_sb_cache[i].p) {
-                    tv_sb_cache[i].p = p;
-                    tv_sb_cache[i].size = size;
-                    tv_sb_cache_bytes += size;
-                    p = NULL;
-                    break;
-                }
+        for (;;) {
+            int free_slot = -1, oldest = -1;
+            for (int i = 0; i < TV_SB_CACHE_SLOTS; i++) {
+                if (!tv_sb_cache[i].p) { if (free_slot < 0) free_slot = i; }
+                else if (oldest < 0 || tv_sb_cache[i].age < tv_sb_cache[oldest].age) oldest = i;
+            }
+            if (free_slot >= 0 && tv_sb_cache_bytes + size <= TV_SB_CACHE_MAX) {
+                tv_sb_cache[free_slot].p = p;
+                tv_sb_cache[free_slot].size = size;
+                tv_sb_cache[free_slot].age = ++clock;
+                tv_sb_cache_bytes += size;
+                p = NULL;
+                break;
+            }
+            drop[ndrop] = tv_sb_cache[oldest].p;
+            drop_size[ndrop++] = tv_sb_cache[oldest].size;
+            tv_sb_cache_bytes -= tv_sb_cache[oldest].size;
+            tv_sb_cache[oldest].p = NULL;
+        }
         os_unfair_lock_unlock(&tv_sb_cache_lock);
     }
+    while (ndrop--) munmap(drop[ndrop], drop_size[ndrop]);
     if (p) munmap(p, size);
 }
 
@@ -243,6 +263,7 @@ static void tv_sb_cache_flush(void) {}
 static void tv_sb_unmap(char *p, size_t size) { (void)size; free(p); }  /* (never mapped here) */
 static size_t tv_sb_map_size(size_t cap) { return cap; }
 static char *tv_sb_map(size_t cap) { return (char *)tv_alloc(cap); }
+static char *tv_sb_cache_take(size_t size, size_t most) { (void)size; (void)most; return NULL; }
 static char *tv_sb_remap(char *p, size_t have, size_t size) { (void)p; (void)have; (void)size; return NULL; }
 #endif
 
@@ -273,9 +294,14 @@ void tv_sb_grow(tv_sb *sb, size_t need) {
         if (old) memcpy(base + TV_STR_HDR, sb->data, sb->len);
         if (old) tv_sb_release_buf(old, sb->cap);
     } else if (TV_SB_MAPPED(cap)) {
-        base = old && TV_SB_MAPPED(sb->cap) ? tv_sb_remap(old, tv_sb_map_size(sb->cap), tv_sb_map_size(cap)) : NULL;
+        /* (one just its size that's cached, rather than growing in place, as a body that began
+         * arriving before it was read grows to its length: copying what's written costs less
+         * than faulting in fresh pages, and the cached one would otherwise sit unused) */
+        size_t size = tv_sb_map_size(cap);
+        bool was_mapped = old && TV_SB_MAPPED(sb->cap);
+        base = was_mapped ? tv_sb_cache_take(size, size + size / 8) : NULL;
+        if (!base && was_mapped && (base = tv_sb_remap(old, tv_sb_map_size(sb->cap), size))) old = NULL;
         if (!base) base = tv_sb_map(cap);
-        else old = NULL;
         if (old) {
             memcpy(base + TV_STR_HDR, sb->data, sb->len);
             /* (an outgrown mapped buffer goes back, not into the cache: a builder doubling to
@@ -12694,9 +12720,10 @@ static void tv_fc_ready(tv_io *h, bool readable, bool writable, bool broken) {
             if (sink->cap - sink->len < want) {
                 /* read whole, its length known: room for the rest at once (a buffer grown by
                  * doubling copies itself each time, ends up to twice the size, and doesn't fit
-                 * the string it becomes, which tv_sb_map would otherwise reuse) */
+                 * the string it becomes, or the next body's, which tv_sb_map would otherwise
+                 * reuse) */
                 size_t rest = (size_t)r->remaining;
-                bool all = r->whole && !tv_fr_decoding(r) && rest <= ((size_t)256 << 20);
+                bool all = r->whole && rest <= ((size_t)256 << 20);
                 tv_sb_grow(sink, sink->len + (all ? rest : want));
             }
             long n = tv_fc_recv(c, sink->data + sink->len, want);
