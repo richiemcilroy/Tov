@@ -242,12 +242,11 @@ static void tv_ws_unsub(tv_ns *s, tv_topic *t) {
 
 static void tv_ws_emit(tv_ns *s, int kind, const uint8_t *p, size_t n, bool text, int code) {
     if (!s->bound) return;
-    tv_arr bytes = tv_arr_fresh();
+    tv_arr bytes = !text && n ? tv_arr_with_capacity(&tv_type_u8, (tv_int)n) : tv_arr_fresh();
     tv_str t = TV_EMPTY_STR;
     if (text) {
         t = tv_str_from((const char *)p, n);
     } else if (n) {
-        bytes = tv_arr_with_capacity(&tv_type_u8, (tv_int)n);
         memcpy(tv_arr_data(bytes), p, n);
         bytes.p->len = (tv_int)n;
     }

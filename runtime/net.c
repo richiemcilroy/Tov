@@ -116,9 +116,8 @@ static void tv_ns_close(tv_ns *s, const char *err);
 /* Delivers an event to the Socket (data and text borrowed for the call). */
 static void tv_ns_emit(tv_ns *s, int kind, const void *data, size_t n, const char *text) {
     if (!s->bound) return;
-    tv_arr bytes = tv_arr_fresh();
+    tv_arr bytes = n ? tv_arr_with_capacity(&tv_type_u8, (tv_int)n) : tv_arr_fresh();
     if (n) {
-        bytes = tv_arr_with_capacity(&tv_type_u8, (tv_int)n);
         memcpy(tv_arr_data(bytes), data, n);
         bytes.p->len = (tv_int)n;
     }
