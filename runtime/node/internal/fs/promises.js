@@ -78,7 +78,7 @@ const {
   validateOffsetLengthRead,
   validateOffsetLengthWrite,
   validatePosition,
-  validateRmOptions,
+  validateRmOptionsSync,
   validateRmdirOptions,
   validateStringAfterArrayBufferView,
   warnOnNonPortableTemplate,
@@ -133,7 +133,6 @@ const {
 } = require('internal/worker/js_transferable');
 
 const getDirectoryEntriesPromise = promisify(getDirents);
-const validateRmOptionsPromise = promisify(validateRmOptions);
 
 let cpPromises;
 function lazyLoadCpPromises() {
@@ -1455,7 +1454,9 @@ async function ftruncate(handle, len = 0) {
 
 async function rm(path, options) {
   path = getValidatedPath(path);
-  options = await validateRmOptionsPromise(path, options, false);
+  // (Tov: checked at once, as rmSync checks: the same errors, rejecting, without a turn of the
+  // loop for an lstat, which with force and recursive it doesn't make at all)
+  options = validateRmOptionsSync(path, options, false);
   // (Tov: removed natively, as rmSync does, on a later turn: not by rimraf's walk, a turn of
   // the loop per entry)
   return new Promise((resolve, reject) => {
