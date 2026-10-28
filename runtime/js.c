@@ -84,6 +84,7 @@ static uint32_t tv_js_u32(const unsigned char *p) { return (uint32_t)p[0] | (uin
  * again (crates/tov/src/build.rs, with_blob). The file ends with the blob's offset and length
  * (u64s) and "TOV_BLOB". */
 static const unsigned char *tv_js_blob_p;
+static size_t tv_js_blob_mapped;   /* its length, when it's mapped from the file */
 
 static bool tv_js_exe_path(char *out, size_t cap);
 
@@ -111,6 +112,7 @@ static const unsigned char *tv_js_blob_data(void) {
         tv_write_fd(2, m, strlen(m));
         _exit(1);
     }
+    tv_js_blob_mapped = (size_t)len;
     return tv_js_blob_p = p;
 }
 
@@ -511,6 +513,9 @@ static JSValueRef tv_jsc_eval(JSContextRef ctx, uint32_t i, bool *cached, JSValu
  * again from the page cache (the files are read-only to it, and replaced by renaming, never
  * rewritten): serving every route afterwards brought back ~5 MB. */
 static void tv_jsc_drop_pages(void) {
+    /* (and the program's JavaScript, mapped from its file: checking each cached module's bytecode
+     * against its text read it all, ~6 MB of that server's resident at idle) */
+    if (tv_js_blob_mapped) madvise((void *)tv_js_blob_p, tv_js_blob_mapped, MADV_DONTNEED);
     if (tv_jsc.state <= 0) return;
     FILE *m = fopen("/proc/self/maps", "r");
     if (!m) return;
