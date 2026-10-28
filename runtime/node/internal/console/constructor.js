@@ -410,11 +410,37 @@ function timeLogImpl(consoleRef, label, formatted, args) {
   }
 }
 
+// Tov: one string to Tov's own stdout or stderr (internal/bootstrap/process's stdioStream), its
+// stream's write not replaced and nothing waiting in it: formatted as it is (a lone string is),
+// and written straight to the fd, as the stream would, without its machinery (a server logging
+// each request does this twice a request). False if it can't be.
+const kStdioWrite = Symbol.for('tov.stdioWrite');
+let WritablePrototypeWrite;
+function writeStringFast(console, streamSymbol, args) {
+  if (args.length !== 1 || typeof args[0] !== 'string') return false;
+  if (console._ignoreErrors !== true || console[kGroupIndentationString].length !== 0) return false;
+  const stream = streamSymbol === kUseStdout ? console._stdout : console._stderr;
+  const write = stream?.[kStdioWrite];
+  if (write === undefined) return false;
+  // (the stream was made: 'stream' is loaded)
+  WritablePrototypeWrite ??= require('stream').Writable.prototype.write;
+  if (stream.write !== WritablePrototypeWrite) return false;
+  const state = stream._writableState;
+  if (state.length !== 0 || state.corked || state.ending || state.destroyed || state.errored) return false;
+  try {
+    write(args[0] + '\n');
+  } catch {
+    // (as the stream's errors are, ignored)
+  }
+  return true;
+}
+
 const consoleMethods = {
   log(...args) {
     if (onLog.hasSubscribers) {
       onLog.publish(args);
     }
+    if (writeStringFast(this, kUseStdout, args)) return;
     this[kWriteToConsole](kUseStdout, this[kFormatForStdout](args));
   },
 
@@ -422,6 +448,7 @@ const consoleMethods = {
     if (onInfo.hasSubscribers) {
       onInfo.publish(args);
     }
+    if (writeStringFast(this, kUseStdout, args)) return;
     this[kWriteToConsole](kUseStdout, this[kFormatForStdout](args));
   },
 
@@ -429,6 +456,7 @@ const consoleMethods = {
     if (onDebug.hasSubscribers) {
       onDebug.publish(args);
     }
+    if (writeStringFast(this, kUseStdout, args)) return;
     this[kWriteToConsole](kUseStdout, this[kFormatForStdout](args));
   },
 
@@ -436,6 +464,7 @@ const consoleMethods = {
     if (onWarn.hasSubscribers) {
       onWarn.publish(args);
     }
+    if (writeStringFast(this, kUseStderr, args)) return;
     this[kWriteToConsole](kUseStderr, this[kFormatForStderr](args));
   },
 
@@ -443,6 +472,7 @@ const consoleMethods = {
     if (onError.hasSubscribers) {
       onError.publish(args);
     }
+    if (writeStringFast(this, kUseStderr, args)) return;
     this[kWriteToConsole](kUseStderr, this[kFormatForStderr](args));
   },
 

@@ -330,6 +330,8 @@ function stdioStream(fd) {
   stream.fd = fd;
   stream._type = 'fs';
   stream._isStdio = true;
+  // (console's way past the stream: internal/console/constructor's writeStringFast)
+  stream[Symbol.for('tov.stdioWrite')] = (s) => native.write(fd, s);
   stream.destroySoon = stream.destroy;
   stream._destroy = (err, cb) => cb(err);
   return stream;
