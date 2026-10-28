@@ -57,6 +57,7 @@ const {
   S_IFREG,
   S_IFSOCK,
   F_OK,
+  O_RDONLY,
   O_WRONLY,
   O_SYMLINK,
 } = constants;
@@ -431,6 +432,10 @@ function tryReadSync(fd, isUserFd, buffer, pos, len) {
  * @returns {string | Buffer}
  */
 function readFileSync(path, options) {
+  // (a path string without a NUL, read as UTF-8: straight to the read, as existsSync)
+  if (typeof path === 'string' && (options === 'utf8' || options === 'utf-8') && path.indexOf('\u0000') === -1) {
+    return binding.readFileUtf8(path, O_RDONLY);
+  }
   options = getOptions(options, { flag: 'r' });
 
   if (options.encoding === 'utf8' || options.encoding === 'utf-8') {

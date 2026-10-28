@@ -38,6 +38,9 @@
 #if defined(__GLIBC__)
 #include <gnu/libc-version.h>
 #endif
+#ifdef __linux__
+#include <sched.h>
+#endif
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
@@ -820,26 +823,30 @@ NATIVE(n_os_cpus) {
     free(items);
     return out;
 #else
-    char model[256] = "unknown";
-    double mhz = 0;
-    FILE *f = fopen("/proc/cpuinfo", "r");
-    if (f) {
-        char line[512];
-        while (fgets(line, sizeof line, f)) {
-            if (!strncmp(line, "model name", 10)) {
-                char *c = strchr(line, ':');
-                if (c) {
-                    snprintf(model, sizeof model, "%s", c + 2);
-                    model[strcspn(model, "\n")] = 0;
+    /* (the model and speed from /proc/cpuinfo, read once: the file is long, ~20 us a read) */
+    static char model[256];
+    static double mhz;
+    if (!model[0]) {
+        snprintf(model, sizeof model, "unknown");
+        FILE *f = fopen("/proc/cpuinfo", "r");
+        if (f) {
+            char line[512];
+            while (fgets(line, sizeof line, f)) {
+                if (!strncmp(line, "model name", 10)) {
+                    char *c = strchr(line, ':');
+                    if (c) {
+                        snprintf(model, sizeof model, "%s", c + 2);
+                        model[strcspn(model, "\n")] = 0;
+                    }
+                } else if (!strncmp(line, "cpu MHz", 7)) {
+                    char *c = strchr(line, ':');
+                    if (c && mhz == 0) mhz = atof(c + 1);
                 }
-            } else if (!strncmp(line, "cpu MHz", 7)) {
-                char *c = strchr(line, ':');
-                if (c && mhz == 0) mhz = atof(c + 1);
             }
+            fclose(f);
         }
-        fclose(f);
     }
-    f = fopen("/proc/stat", "r");
+    FILE *f = fopen("/proc/stat", "r");
     if (!f) return array(ctx, 0, NULL);
     long tick = sysconf(_SC_CLK_TCK);
     double mult = tick > 0 ? 1000.0 / (double)tick : 10;
@@ -950,6 +957,12 @@ NATIVE(n_os_setpriority) {
 
 NATIVE(n_os_parallelism) {
     UNUSED;
+#ifdef __linux__
+    /* (the CPUs this process may run on, as libuv counts them: one call, where sysconf reads a
+     * file in /sys each time) */
+    cpu_set_t set;
+    if (sched_getaffinity(0, sizeof set, &set) == 0) return num(ctx, CPU_COUNT(&set) > 0 ? CPU_COUNT(&set) : 1);
+#endif
     long c = sysconf(_SC_NPROCESSORS_ONLN);
     return num(ctx, c > 0 ? (double)c : 1);
 }
