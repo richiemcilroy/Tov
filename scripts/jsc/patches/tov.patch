@@ -91,11 +91,51 @@ index 0c6c39e9..56ea082f 100644
  
  } // namespace JSC
 diff --git a/Source/JavaScriptCore/heap/Heap.cpp b/Source/JavaScriptCore/heap/Heap.cpp
-index 67e317d5..737769d3 100644
+index 67e317d5..a08b1009 100644
 --- a/Source/JavaScriptCore/heap/Heap.cpp
 +++ b/Source/JavaScriptCore/heap/Heap.cpp
-@@ -1180,6 +1180,13 @@ void Heap::deleteAllUnlinkedCodeBlocks(DeleteAllCodeEffort effort)
+@@ -26,6 +26,7 @@
+ 
+ #include "BuiltinExecutables.h"
+ #include "CodeBlock.h"
++#include "FunctionExecutable.h"
+ #include "CodeBlockSetInlines.h"
+ #include "CollectingScope.h"
+ #include "ConservativeRoots.h"
+@@ -1119,6 +1120,16 @@ TypeCountSet Heap::objectTypeCounts()
+     return result;
+ }
+ 
++// Tov: the bytecode of the runtime's own modules (their sources are named node:...) is kept when
++// all code is deleted, their machine code not: every program runs them (its console, streams,
++// fs), and runs them again soon after an idle drops the rest. Parsed again from their source,
++// a server's first work after idling took ~0.6 ms more (Cap's media server shutting down), for
++// ~3 MB more held while idle.
++static bool tovIsRuntimeCode(ScriptExecutable* executable)
++{
++    return executable->source().provider() && executable->sourceURL().startsWith("node:"_s);
++}
++
+ void Heap::deleteAllCodeBlocks(DeleteAllCodeEffort effort)
+ {
+     if (m_collectionScope && effort == DeleteAllCodeIfNotCollecting)
+@@ -1175,11 +1186,28 @@ void Heap::deleteAllUnlinkedCodeBlocks(DeleteAllCodeEffort effort)
+     RELEASE_ASSERT(!m_collectionScope);
+ 
+     HeapIterationScope heapIterationScope(*this);
++    // (the runtime's functions keep theirs: see tovIsRuntimeCode)
++    UncheckedKeyHashSet<UnlinkedFunctionExecutable*> kept;
++    functionExecutableSpaceAndSet.space.forEachLiveCell(
++        [&] (HeapCell* cell, HeapCell::Kind) {
++            FunctionExecutable* executable = static_cast<FunctionExecutable*>(cell);
++            if (tovIsRuntimeCode(executable))
++                kept.add(executable->unlinkedExecutable());
++        });
+     unlinkedFunctionExecutableSpaceAndSet.set.forEachLiveCell(
+         [&] (HeapCell* cell, HeapCell::Kind) {
              UnlinkedFunctionExecutable* executable = static_cast<UnlinkedFunctionExecutable*>(cell);
++            if (kept.contains(executable))
++                return;
              executable->clearCode(vm);
          });
 +    // Tov: and the functions still to be decoded from the bytecode cache let it go (they're
