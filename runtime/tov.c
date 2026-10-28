@@ -11553,11 +11553,30 @@ static void tv_base64(tv_sb *sb, const char *s, size_t n) {
     }
 }
 
+/* The proxy variables, read once (each fetch read four: a scan of the environment each; the
+ * program's own process.env doesn't change the C environment they're in). */
+static struct { bool read; const char *no_proxy, *http, *https; } tv_proxy_env;
+
+static void tv_proxy_env_read(void) {
+    if (tv_proxy_env.read) return;
+    tv_proxy_env.read = true;
+    const char *list = getenv("no_proxy");
+    if (!list || !*list) list = getenv("NO_PROXY");
+    tv_proxy_env.no_proxy = list;
+    for (int https = 0; https < 2; https++) {
+        const char *spec = https ? getenv("https_proxy") : getenv("http_proxy");
+        if (!spec || !*spec) spec = https ? getenv("HTTPS_PROXY") : getenv("HTTP_PROXY");
+        if (spec && !*spec) spec = NULL;
+        if (https) tv_proxy_env.https = spec;
+        else tv_proxy_env.http = spec;
+    }
+}
+
 /* NO_PROXY: "*", or comma-separated hosts, domains ("example.com" also covers its subdomains,
  * as does ".example.com") and host:port pairs. */
 static bool tv_no_proxy(const char *host, int port) {
-    const char *list = getenv("no_proxy");
-    if (!list || !*list) list = getenv("NO_PROXY");
+    tv_proxy_env_read();
+    const char *list = tv_proxy_env.no_proxy;
     if (!list) return false;
     size_t hl = strlen(host);
     for (const char *p = list; *p;) {
@@ -11590,11 +11609,7 @@ static bool tv_fr_choose_proxy(tv_fr *r, bool https) {
     r->proxy_auth = NULL;
     r->via_proxy = false;
     const char *spec = r->proxy.p->len ? r->proxy.p->data : NULL;
-    if (!spec && !r->unix_path.p->len && !tv_no_proxy(r->host, r->port)) {
-        spec = https ? getenv("https_proxy") : getenv("http_proxy");
-        if (!spec || !*spec) spec = https ? getenv("HTTPS_PROXY") : getenv("HTTP_PROXY");
-        if (spec && !*spec) spec = NULL;
-    }
+    if (!spec && !r->unix_path.p->len && !tv_no_proxy(r->host, r->port)) spec = https ? tv_proxy_env.https : tv_proxy_env.http;
     if (!spec || r->unix_path.p->len) {
         size_t hl = strlen(r->host);
         r->dial_host = tv_alloc(hl + 1);
