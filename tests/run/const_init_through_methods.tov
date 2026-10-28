@@ -1,0 +1,22 @@
+const word = "ab".repeat(2)
+const count = process.argv.length + 1
+const label = "x".repeat(3)
+class Base {
+  greeting: string = word + "?"
+  read(): string { return word }
+  static total(): number { return count * 10 }
+}
+class Derived extends Base {
+  read(): string { return label }
+}
+function make(): Base { return new Derived() }
+const fromMethod = new Base().read() + "!"
+const fromStatic = Base.total()
+const fromField = new Base().greeting
+const fromOverride = make().read()
+function main() {
+  console.log(fromMethod)
+  console.log(fromStatic)
+  console.log(fromField)
+  console.log(fromOverride)
+}
