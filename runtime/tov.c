@@ -11794,6 +11794,15 @@ static bool tv_fc_write(tv_fc *c) {
 
 /* ---- the response */
 
+/* No one's reading what's arrived: stop reading until they do. What's held meanwhile is told to
+ * the host's collector (a response read partway and dropped holds it, and its connection, until
+ * the response is collected); bytes a reader takes it counts itself, as they reach it. */
+static void tv_fr_pause(tv_fr *r, tv_fc *c) {
+    r->paused = true;
+    tv_fc_interest(c, false, false);
+    if (tv_fetch_on_bytes) tv_fetch_on_bytes(r->raw.len + r->rbody.len);
+}
+
 static int tv_hex(char ch) { return ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1; }
 
 static bool tv_ieq(const char *a, size_t n, const char *lit) {
@@ -12699,7 +12708,7 @@ static void tv_fc_ready(tv_io *h, bool readable, bool writable, bool broken) {
                 bool full = tv_fr_data(r);
                 if (r->result != 1) return; /* the body couldn't be decoded */
                 if (r->remaining == 0) { r->state = TV_FR_DONE; break; }
-                if (full) { r->paused = true; tv_fc_interest(c, false, false); break; }
+                if (full) { tv_fr_pause(r, c); break; }
                 /* a stream's reader gets each 64 KB as it arrives, before more is read (the socket
                  * raises its next event for the rest; TLS's buffered records wouldn't) */
                 if (r->streaming && !c->tls && r->rbody.len >= ((size_t)64 << 10)) break;
@@ -12730,7 +12739,6 @@ static void tv_fc_ready(tv_io *h, bool readable, bool writable, bool broken) {
         if (n > 0) {
             r->got_any = true;
             c->in_len += (size_t)n;
-            if (tv_fetch_on_bytes) tv_fetch_on_bytes((size_t)n);
             int st = tv_fr_parse(r, c);
             if (r->result != 1) return;
             if (st < 0) {
@@ -12739,8 +12747,7 @@ static void tv_fc_ready(tv_io *h, bool readable, bool writable, bool broken) {
             }
             if (st > 0) break;
             if (r->streaming ? r->rbody.len >= TV_STREAM_HIGH || r->raw_off < r->raw.len : !r->whole && tv_fr_sink(r)->len >= TV_STREAM_HIGH) {
-                r->paused = true;
-                tv_fc_interest(c, false, false);
+                tv_fr_pause(r, c);
                 break;
             }
             if ((size_t)n == room || c->tls) continue;

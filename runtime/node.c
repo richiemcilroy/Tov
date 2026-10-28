@@ -3982,7 +3982,7 @@ NATIVE(n_fetch_tls) {
 /* (JavaScriptCore's, exported though not in its headers) */
 extern void JSReportExtraMemoryCost(JSContextRef ctx, size_t size) __attribute__((weak_import));
 
-/* Response bytes arriving: memory the engine's objects hold, which it should count towards its
+/* Response bytes held unread: memory the engine's objects hold, which it should count towards its
  * next collection (a response read partway and dropped holds its buffer and connection until
  * then) */
 static void tv_node_fetch_bytes(size_t n) {
