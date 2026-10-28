@@ -71,7 +71,13 @@ function which(command, options) {
     const p = command.charCodeAt(0) === 47 ? path.resolve(command) : path.resolve(options?.cwd ?? process.cwd(), command);
     return runnable(p) ? p : null;
   }
-  const dirs = `${options?.PATH ?? process.env.PATH ?? ''}`.split(':');
+  const PATH = `${options?.PATH ?? process.env.PATH ?? ''}`;
+  if (native) {
+    // (natively, when PATH's directories are absolute as they read)
+    const found = globalThis.__tov_native.fs.which(command, PATH);
+    if (found !== undefined) return found;
+  }
+  const dirs = PATH.split(':');
   for (const dir of dirs) {
     if (!dir) continue;
     const p = dir.charCodeAt(0) === 47 ? path.resolve(dir, command) : path.resolve(options?.cwd ?? process.cwd(), dir, command);

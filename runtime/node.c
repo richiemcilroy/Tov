@@ -1529,6 +1529,48 @@ NATIVE(n_fs_runnable) {
     return JSValueMakeBoolean(ctx, ok);
 }
 
+/* which(command, PATH): Bun.which's search of PATH, natively: the first absolute directory
+ * holding an executable regular file `command`, as dir + "/" + command; null if none; undefined
+ * if a directory before it isn't one path.resolve leaves as it is (relative, "." or "..",
+ * doubled or trailing slashes): the caller searches then */
+static bool tv_node_plain_dir(const char *d, size_t n) {
+    if (n == 0 || d[0] != '/' || (n > 1 && d[n - 1] == '/')) return false;
+    for (size_t i = 0; i + 1 < n; i++) {
+        if (d[i] != '/') continue;
+        if (d[i + 1] == '/') return false;
+        if (d[i + 1] == '.' && (i + 2 == n || d[i + 2] == '/' || (d[i + 2] == '.' && (i + 3 == n || d[i + 3] == '/')))) return false;
+    }
+    return true;
+}
+
+NATIVE(n_fs_which) {
+    UNUSED;
+    char *cmd = arg_cstr(ctx, n, a, 0), *path = arg_cstr(ctx, n, a, 1);
+    JSValueRef r = undef(ctx);
+    if (cmd && path && *cmd && !strchr(cmd, '/')) {
+        size_t cl = strlen(cmd);
+        char buf[4096];
+        r = JSValueMakeNull(ctx);
+        for (const char *p = path;;) {
+            const char *e = strchr(p, ':');
+            size_t dl = e ? (size_t)(e - p) : strlen(p);
+            if (dl) {
+                if (!tv_node_plain_dir(p, dl) || dl + cl + 2 > sizeof buf) { r = undef(ctx); break; }
+                memcpy(buf, p, dl);
+                buf[dl] = '/';
+                memcpy(buf + dl + 1, cmd, cl + 1);
+                struct stat st;
+                if (access(buf, X_OK) == 0 && stat(buf, &st) == 0 && S_ISREG(st.st_mode)) { r = str(ctx, buf); break; }
+            }
+            if (!e) break;
+            p = e + 1;
+        }
+    }
+    free(cmd);
+    free(path);
+    return r;
+}
+
 /* internalModuleStat(path): 0 file, 1 directory, negative errno */
 NATIVE(n_fs_module_stat) {
     UNUSED;
@@ -1578,6 +1620,7 @@ void tv_node_fs_install(JSContextRef ctx, JSObjectRef native) {
     tv_js_def(ctx, fs, "writeFileUtf8", n_fs_write_utf8);
     tv_js_def(ctx, fs, "exists", n_fs_exists);
     tv_js_def(ctx, fs, "runnable", n_fs_runnable);
+    tv_js_def(ctx, fs, "which", n_fs_which);
     tv_js_def(ctx, fs, "internalModuleStat", n_fs_module_stat);
     set(ctx, native, "fs", fs);
 }
