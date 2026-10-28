@@ -39,26 +39,46 @@ bench/cap-media/run.py --cap ~/github/Cap --reps 3 --secs 10
 
 ## Results
 
-Bun 1.4.0, Tov on its own JavaScriptCore (`scripts/jsc`). Medians of 3 repetitions with 10 s per load: on macOS from `bench/results/cap-media-20261011-013803.json`, and a run on Linux. The origin and the load generator run on the same machine, so differences of a few percent are noise. Memory is the physical footprint on macOS and the resident set on Linux.
+Tov on its own JavaScriptCore (`scripts/jsc`). The origin and the load generator run on the same machine, so differences of a few percent are noise. Memory is the physical footprint on macOS and the resident set on Linux.
 
-| | macOS (M4 Max): Bun | Tov | Linux (x86-64, Ryzen 9950X): Bun | Tov |
-|---|---:|---:|---:|---:|
-| startup (exec to first `/health`) | 128 ms | **107 ms** | **193 ms** | 354 ms |
-| idle memory | 50 MB | 50 MB | **91 MB** | 125 MB |
-| `/health` | 33.1k req/s (p99 3.7 ms) | **35.5k req/s** (p99 3.4 ms) | 21.4k req/s (p99 6.3 ms) | **22.5k req/s** (p99 4.6 ms) |
-| CPU per `/health` | 34 µs | **32 µs** | 53 µs | **51 µs** |
-| `/video/probe` | **1,468/s** (p99 7.4 ms) | 1,353/s (p99 7.7 ms) | 517/s (p99 66 ms) | **899/s** (p99 12 ms) |
-| CPU per probe | 1,248 µs | **881 µs** | 2,708 µs | **1,349 µs** |
-| `/audio/extract` | 19.6/s (p99 172 ms) | 19.0/s (p99 154 ms) | 17.9/s (p99 249 ms) | 16.9/s (p99 167 ms) |
-| CPU per extract (the server's, not ffmpeg's) | 10.4 ms | **10.2 ms** | **8.6 ms** | 13.2 ms |
-| memory 3 s after the load | 65 MB | 66 MB | **137 MB** | 148 MB |
-| peak memory | 136 MB | **126 MB** | **162 MB** | 205 MB |
-| failed requests | 0 | 0 | 0 | 0 |
+macOS (M4 Max), Bun 1.4.4: medians of 5 repetitions with 10 s per load, from `bench/results/cap-media-20261028-142535.json`.
 
-The Tov binary builds in 0.8 s on macOS with its bytecode cached (1.3 s with nothing cached) and is 36 MB with its engine; on Linux, 47 MB. The packages' native addon (node-av, 61 MB) loads from `node_modules`, as under Bun.
+| | Bun | Tov |
+|---|---:|---:|
+| startup (exec to first `/health`) | 128 ms | **101 ms** |
+| idle memory | 47.9 MB | **43.0 MB** |
+| `/health` | 31.8k req/s (p99 3.9 ms) | **40.8k req/s** (p99 2.4 ms) |
+| CPU per `/health` | 35 µs | **27 µs** |
+| `/video/probe` | 2,708/s (p50 1.37 ms, p99 3.0 ms) | **2,732/s** (p50 1.37 ms, p99 3.1 ms) |
+| CPU per probe | 563 µs | **405 µs** |
+| `/audio/extract` | 26.2/s (p50 76.1 ms) | 26.0/s (p50 76.5 ms) |
+| CPU per extract (the server's, not ffmpeg's) | 6.8 ms | **2.4 ms** |
+| memory 3 s after the load | 60.3 MB | **52.7 MB** |
+| peak memory | 162 MB | **90 MB** |
+| shutdown (SIGTERM to exit, as `Popen.wait` sees it) | 8.8 ms | 8.8 ms |
+| failed requests | 0 | 0 |
 
-- **CPU**: Tov probes a video on 29% less CPU than Bun on macOS, and half on Linux.
-- **Throughput**: on macOS, with 4 probes in flight, Bun completes 8% more each second. Its `fetch()` client runs on a thread of its own, so the server's thread and the client's work in parallel; Tov's client runs on the event loop. On Linux Tov completes 74% more.
-- **Startup**: on macOS Tov loads the server's 654 modules from its bytecode cache, written the first time the program idles. On Linux it starts slower than Bun, and holds more memory throughout: the engine's Linux build isn't tuned as the macOS one is yet.
-- **Memory**: on macOS Tov peaks lower under load: its engine lets the heap grow to about twice what survives a collection, where JavaScriptCore's default on a machine with 16 GB or more is about four times. Once the server has been idle a second it collects and returns memory (a timer that does next to nothing, like the 5 s timeout the server leaves per ffmpeg it runs, doesn't count as work), and drops compiled code soon after.
-- **Reliability**: when the origin refuses a connection under load, mediabunny's retried fetch rejects. Bun 1.4.0 has exited on it in earlier runs; Tov reports the request's failure and carries on.
+Linux (x86-64, Ryzen 9950X), an earlier run (Bun 1.4.0, the engine and runtime of 2026-10-11, 3 repetitions):
+
+| | Bun | Tov |
+|---|---:|---:|
+| startup (exec to first `/health`) | **193 ms** | 354 ms |
+| idle memory | **91 MB** | 125 MB |
+| `/health` | 21.4k req/s (p99 6.3 ms) | **22.5k req/s** (p99 4.6 ms) |
+| CPU per `/health` | 53 µs | **51 µs** |
+| `/video/probe` | 517/s (p99 66 ms) | **899/s** (p99 12 ms) |
+| CPU per probe | 2,708 µs | **1,349 µs** |
+| `/audio/extract` | 17.9/s (p99 249 ms) | 16.9/s (p99 167 ms) |
+| CPU per extract (the server's, not ffmpeg's) | **8.6 ms** | 13.2 ms |
+| memory 3 s after the load | **137 MB** | 148 MB |
+| peak memory | **162 MB** | 205 MB |
+| failed requests | 0 | 0 |
+
+The Tov binary builds in 0.5 s on macOS with its bytecode cached and is 36 MB with its engine; on Linux, 47 MB. The packages' native addon (node-av, 61 MB) loads from `node_modules`, as under Bun.
+
+- **CPU**: on macOS Tov serves `/health` on 22% less CPU than Bun, probes a video on 28% less, and extracts audio on 64% less.
+- **Latency**: probes and extracts spend most of their time waiting on the origin and ffmpeg, and come out level. Bun's `fetch()` client reads and writes its sockets on a thread of its own; Tov's does so on the event loop, which with 4 probes in flight is idle about half the time.
+- **Startup**: Tov loads the server's 654 modules from its bytecode cache, written the first time the program idles. On Linux it started slower than Bun, and held more memory throughout: the engine's Linux build wasn't tuned as the macOS one was.
+- **Memory**: Tov peaks lower under load: its engine lets the heap grow to about three times what survives a collection, and counts the 64 KB arrays a probe streams through as freed when a young collection frees them (JavaScriptCore otherwise counts them until a full collection, which they bring on). Once the server has been idle a second it collects and returns memory (a timer that does next to nothing, like the 5 s timeout the server leaves per ffmpeg it runs, doesn't count as work), and drops compiled code soon after, all but the runtime's own bytecode.
+- **Shutdown**: measured exactly (a blocking `waitpid`), Tov exits ~4.5 ms after SIGTERM and Bun ~3.7 ms; the harness's `Popen.wait` polls, so both read 8.8 ms. Most of the difference is the server's shutdown code running for the first time, its bytecode dropped while it idled.
+- **Reliability**: when the origin refuses a connection under load, mediabunny's retried fetch rejects. Bun 1.4.0 exited on it in earlier runs; Tov reports the request's failure and carries on.
