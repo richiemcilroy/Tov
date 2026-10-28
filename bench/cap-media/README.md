@@ -41,20 +41,20 @@ bench/cap-media/run.py --cap ~/github/Cap --reps 3 --secs 10
 
 Tov on its own JavaScriptCore (`scripts/jsc`). The origin and the load generator run on the same machine, so differences of a few percent are noise. Memory is the physical footprint on macOS and the resident set on Linux.
 
-macOS (M4 Max), Bun 1.4.4: medians of 5 repetitions with 10 s per load, from `bench/results/cap-media-20261028-150704.json`.
+macOS (M4 Max), Bun 1.4.4: medians of 5 repetitions with 10 s per load, from `bench/results/cap-media-20261028-220527.json`.
 
 | | Bun | Tov |
 |---|---:|---:|
-| startup (exec to first `/health`) | 125 ms | **104 ms** |
-| idle memory | 47.5 MB | **43.0 MB** |
-| `/health` | 31.8k req/s (p99 3.9 ms) | **41.4k req/s** (p99 2.3 ms) |
-| CPU per `/health` | 35 µs | **27 µs** |
-| `/video/probe` | 2,655/s (p50 1.4 ms, p99 3.3 ms) | **2,835/s** (p50 1.3 ms, p99 2.9 ms) |
-| CPU per probe | 571 µs | **404 µs** |
-| `/audio/extract` | 26.1/s (p50 76.2 ms, p99 87.2 ms) | 26.1/s (p50 76.1 ms, p99 86.3 ms) |
-| CPU per extract (the server's, not ffmpeg's) | 6.8 ms | **2.6 ms** |
-| memory 3 s after the load | 59.6 MB | **52.8 MB** |
-| peak memory | 161 MB | **91 MB** |
+| startup (exec to first `/health`) | 121 ms | **95 ms** |
+| idle memory | 47.9 MB | **43.4 MB** |
+| `/health` | 33.7k req/s (p99 3.6 ms) | **45.2k req/s** (p99 2.6 ms) |
+| CPU per `/health` | 33 µs | **25 µs** |
+| `/video/probe` | 2,613/s (p50 1.4 ms, p99 3.2 ms) | **2,789/s** (p50 1.3 ms, p99 2.8 ms) |
+| CPU per probe | 576 µs | **410 µs** |
+| `/audio/extract` | 26.0/s (p50 76.7 ms, p99 80.1 ms) | 25.9/s (p50 77.0 ms, p99 81.2 ms) |
+| CPU per extract (the server's, not ffmpeg's) | 7.0 ms | **2.7 ms** |
+| memory 3 s after the load | 59.4 MB | **52.7 MB** |
+| peak memory | 170 MB | **90 MB** |
 | shutdown (SIGTERM to exit, as `Popen.wait` sees it) | 8.8 ms | 8.8 ms |
 | failed requests | 0 | 0 |
 
@@ -76,7 +76,7 @@ Linux (x86-64, Ryzen 9950X), an earlier run (Bun 1.4.0, the engine and runtime o
 
 The Tov binary builds in 0.5 s on macOS with its bytecode cached and is 36 MB with its engine; on Linux, 47 MB. The packages' native addon (node-av, 61 MB) loads from `node_modules`, as under Bun.
 
-- **CPU**: on macOS Tov serves `/health` on 23% less CPU than Bun, probes a video on 29% less, and extracts audio on 61% less.
+- **CPU**: on macOS Tov serves `/health` on 25% less CPU than Bun, probes a video on 29% less, and extracts audio on 62% less.
 - **Latency**: probes and extracts spend most of their time waiting on the origin and ffmpeg. Bun's `fetch()` client reads and writes its sockets on a thread of its own; Tov's does so on the event loop, keeping three connections to the origin idle or opening (media readers end each range partway, so each probe wants a new one), which with 4 probes in flight completes ~7% more each second.
 - **Startup**: Tov loads the server's 654 modules from its bytecode cache, written the first time the program idles. On Linux it started slower than Bun, and held more memory throughout: the engine's Linux build wasn't tuned as the macOS one was.
 - **Memory**: Tov peaks lower under load: its engine lets the heap grow to about three times what survives a collection, and counts the 64 KB arrays a probe streams through as freed when a young collection frees them (JavaScriptCore otherwise counts them until a full collection, which they bring on). Once the server has been idle a second it collects and returns memory (a timer that does next to nothing, like the 5 s timeout the server leaves per ffmpeg it runs, doesn't count as work), and drops compiled code soon after, all but the runtime's own bytecode.
