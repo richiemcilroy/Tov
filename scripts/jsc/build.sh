@@ -39,11 +39,22 @@ version=$( (echo "$TAG"; cat "$here"/patches/* "$here"/include/*/*) | cksum | cu
 os=$(uname -s | tr A-Z a-z)
 arch=$(uname -m)
 [ "$arch" = aarch64 ] && arch=arm64
-build="$cache/build-$os-$arch"
+# TOV_JSC_PGO=gen builds an engine that records a profile of where it spends its time
+# (programs linked with TOV_JSC_DIR=<cache>/<os>-<arch>-gen and TOV_CFLAGS=-fprofile-instr-generate
+# write it as they run); TOV_JSC_PGO=<merged .profdata> builds the engine optimized for it.
+pgo=${TOV_JSC_PGO:-}
+suffix=""
+[ "$pgo" = gen ] && suffix="-gen"
+build="$cache/build-$os-$arch$suffix"
 # (macOS: libpthread's private header, for the engine's fast thread-local slots: include/)
 flags="-ffunction-sections -fdata-sections"
 [ "$os" = darwin ] && flags="$flags -I$here/include"
-out="$cache/$os-$arch"
+if [ "$pgo" = gen ]; then
+    flags="$flags -fprofile-instr-generate"
+elif [ -n "$pgo" ]; then
+    flags="$flags -fprofile-instr-use=$pgo -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin"
+fi
+out="$cache/$os-$arch$suffix"
 # (ThinLTO on macOS, whose packaging below merges the bitcode into machine code; Linux's doesn't
 # yet, so its objects stay machine code)
 lto="-DLTO_MODE="
@@ -79,7 +90,7 @@ if [ "$os" = darwin ]; then
     # of the engine's code, at no cost to each link that an order file there would add.)
     sed 's/^/_/' "$here/order-linux.txt" > "$out.tmp/order"
     clang -r -nostdlib -flto=thin -O3 -Wl,-mllvm,-import-instr-limit=20 -Wl,-keep_private_externs @"$out.tmp/llint-uses" -Wl,-force_load,"$out.tmp/libJavaScriptCore.a" $jit "$build/lib/libWTF.a" "$build/lib/libbmalloc.a" \
-        -Wl,-order_file,"$out.tmp/order" -Wl,-cache_path_lto,"$cache/lto-cache-$os-$arch" -o "$out.tmp/optimized.o"
+        -Wl,-order_file,"$out.tmp/order" -Wl,-cache_path_lto,"$cache/lto-cache-$os-$arch$suffix" -o "$out.tmp/optimized.o"
     # Then the interpreters merged in, and only what's called from outside the engine left
     # global: its C API, Tov's (TovAPI), and the functions the runtime calls by name
     # (runtime/js.c). The rest is local to the object, so a program's link resolves a few hundred
