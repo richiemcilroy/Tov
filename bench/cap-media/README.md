@@ -41,20 +41,20 @@ bench/cap-media/run.py --cap ~/github/Cap --reps 3 --secs 10
 
 Tov on its own JavaScriptCore (`scripts/jsc`). The origin and the load generator run on the same machine, so differences of a few percent are noise. Memory is the physical footprint on macOS and the resident set on Linux.
 
-macOS (M4 Max), Bun 1.4.4: medians of 5 repetitions with 10 s per load, from `bench/results/cap-media-20261028-142535.json`.
+macOS (M4 Max), Bun 1.4.4: medians of 5 repetitions with 10 s per load, from `bench/results/cap-media-20261028-150704.json`.
 
 | | Bun | Tov |
 |---|---:|---:|
-| startup (exec to first `/health`) | 128 ms | **101 ms** |
-| idle memory | 47.9 MB | **43.0 MB** |
-| `/health` | 31.8k req/s (p99 3.9 ms) | **40.8k req/s** (p99 2.4 ms) |
+| startup (exec to first `/health`) | 125 ms | **104 ms** |
+| idle memory | 47.5 MB | **43.0 MB** |
+| `/health` | 31.8k req/s (p99 3.9 ms) | **41.4k req/s** (p99 2.3 ms) |
 | CPU per `/health` | 35 µs | **27 µs** |
-| `/video/probe` | 2,708/s (p50 1.37 ms, p99 3.0 ms) | **2,732/s** (p50 1.37 ms, p99 3.1 ms) |
-| CPU per probe | 563 µs | **405 µs** |
-| `/audio/extract` | 26.2/s (p50 76.1 ms) | 26.0/s (p50 76.5 ms) |
-| CPU per extract (the server's, not ffmpeg's) | 6.8 ms | **2.4 ms** |
-| memory 3 s after the load | 60.3 MB | **52.7 MB** |
-| peak memory | 162 MB | **90 MB** |
+| `/video/probe` | 2,655/s (p50 1.4 ms, p99 3.3 ms) | **2,835/s** (p50 1.3 ms, p99 2.9 ms) |
+| CPU per probe | 571 µs | **404 µs** |
+| `/audio/extract` | 26.1/s (p50 76.2 ms, p99 87.2 ms) | 26.1/s (p50 76.1 ms, p99 86.3 ms) |
+| CPU per extract (the server's, not ffmpeg's) | 6.8 ms | **2.6 ms** |
+| memory 3 s after the load | 59.6 MB | **52.8 MB** |
+| peak memory | 161 MB | **91 MB** |
 | shutdown (SIGTERM to exit, as `Popen.wait` sees it) | 8.8 ms | 8.8 ms |
 | failed requests | 0 | 0 |
 
@@ -76,8 +76,8 @@ Linux (x86-64, Ryzen 9950X), an earlier run (Bun 1.4.0, the engine and runtime o
 
 The Tov binary builds in 0.5 s on macOS with its bytecode cached and is 36 MB with its engine; on Linux, 47 MB. The packages' native addon (node-av, 61 MB) loads from `node_modules`, as under Bun.
 
-- **CPU**: on macOS Tov serves `/health` on 22% less CPU than Bun, probes a video on 28% less, and extracts audio on 64% less.
-- **Latency**: probes and extracts spend most of their time waiting on the origin and ffmpeg, and come out level. Bun's `fetch()` client reads and writes its sockets on a thread of its own; Tov's does so on the event loop, which with 4 probes in flight is idle about half the time.
+- **CPU**: on macOS Tov serves `/health` on 23% less CPU than Bun, probes a video on 29% less, and extracts audio on 61% less.
+- **Latency**: probes and extracts spend most of their time waiting on the origin and ffmpeg. Bun's `fetch()` client reads and writes its sockets on a thread of its own; Tov's does so on the event loop, keeping three connections to the origin idle or opening (media readers end each range partway, so each probe wants a new one), which with 4 probes in flight completes ~7% more each second.
 - **Startup**: Tov loads the server's 654 modules from its bytecode cache, written the first time the program idles. On Linux it started slower than Bun, and held more memory throughout: the engine's Linux build wasn't tuned as the macOS one was.
 - **Memory**: Tov peaks lower under load: its engine lets the heap grow to about three times what survives a collection, and counts the 64 KB arrays a probe streams through as freed when a young collection frees them (JavaScriptCore otherwise counts them until a full collection, which they bring on). Once the server has been idle a second it collects and returns memory (a timer that does next to nothing, like the 5 s timeout the server leaves per ffmpeg it runs, doesn't count as work), and drops compiled code soon after, all but the runtime's own bytecode.
 - **Shutdown**: measured exactly (a blocking `waitpid`), Tov exits ~4.5 ms after SIGTERM and Bun ~3.7 ms; the harness's `Popen.wait` polls, so both read 8.8 ms. Most of the difference is the server's shutdown code running for the first time, its bytecode dropped while it idled.
