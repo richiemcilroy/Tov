@@ -1190,9 +1190,13 @@ JSValueRef tv_js_from_str(tv_str s) {
         slot = (uint32_t)(((uintptr_t)s.p >> 4) * 0x9e3779b97f4a7c15ull >> 56);
         if (lits[slot].p == s.p) return lits[slot].v;
     }
+#ifdef TOV_API_STRINGS
+    JSValueRef v = TVMakeString(ctx, s.p->data, (size_t)s.p->len);
+#else
     JSStringRef r = tv_js_string_ref(s.p->data, (size_t)s.p->len, true);
     JSValueRef v = JSValueMakeString(ctx, r);
     JSStringRelease(r);
+#endif
     if (s.p->rc < 0) {
         if (lits[slot].v) JSValueUnprotect(ctx, lits[slot].v);
         JSValueProtect(ctx, v);
@@ -1204,10 +1208,14 @@ JSValueRef tv_js_from_str(tv_str s) {
 
 JSValueRef tv_js_str(const char *s, size_t n) {
     JSContextRef ctx = tv_js();
+#ifdef TOV_API_STRINGS
+    return TVMakeString(ctx, s, n);
+#else
     JSStringRef r = tv_js_string_ref(s, n, false);
     JSValueRef v = JSValueMakeString(ctx, r);
     JSStringRelease(r);
     return v;
+#endif
 }
 
 static tv_str tv_js_string_to_str(JSStringRef r) {
@@ -1235,8 +1243,30 @@ static tv_str tv_js_string_to_str(JSStringRef r) {
     return tv_str_from_sb(&sb);
 }
 
+#ifdef TOV_API_STRINGS
+/* A string's UTF-8 straight from the engine (ASCII copied as it is, no UTF-16 between); false
+ * if v isn't a string. */
+static bool tv_js_utf8_str(JSContextRef ctx, JSValueRef v, tv_str *out) {
+    char small[512];
+    size_t n = TVGetStringUTF8(ctx, v, small, sizeof small);
+    if (n == SIZE_MAX) return false;
+    if (n < sizeof small) {
+        *out = tv_str_from(small, n);
+        return true;
+    }
+    char *data;
+    *out = tv_str_alloc(n, &data);
+    TVGetStringUTF8(ctx, v, data, n);
+    return true;
+}
+#endif
+
 tv_str tv_js_to_str(JSValueRef v) {
     JSContextRef ctx = tv_js();
+#ifdef TOV_API_STRINGS
+    tv_str u;
+    if (tv_js_utf8_str(ctx, v, &u)) return u;
+#endif
     JSValueRef exc = NULL;
     JSStringRef r = JSValueToStringCopy(ctx, v, &exc);
     if (!r) return tv_str_from("[object]", 8);
@@ -1289,11 +1319,15 @@ bool tv_js_as_bool_slow(JSValueRef v, bool *out) {
 
 bool tv_js_as_str(JSValueRef v, tv_str *out) {
     JSContextRef ctx = tv_js();
+#ifdef TOV_API_STRINGS
+    return tv_js_utf8_str(ctx, v, out);
+#else
     if (!JSValueIsString(ctx, v)) return false;
     JSStringRef r = JSValueToStringCopy(ctx, v, NULL);
     *out = tv_js_string_to_str(r);
     JSStringRelease(r);
     return true;
+#endif
 }
 
 /* tv_type_js: Js values in Tov containers */

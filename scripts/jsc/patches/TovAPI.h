@@ -114,6 +114,20 @@ static inline JSValueRef TVReadCached(JSValueRef value, const TVPropertyCache *c
 }
 JS_EXPORT void TVReleaseStickyLock(JSContextRef ctx);
 
+/* Strings across the API without the C API's copies (JSStringRef's, its UTF-16 conversions): */
+#define TOV_API_STRINGS 1
+/* A string of `len` bytes of UTF-8 at `utf8` (invalid sequences read as U+FFFD, as TextDecoder
+ * reads them): ASCII copied once, into an 8-bit string. */
+JS_EXPORT JSValueRef TVMakeString(JSContextRef ctx, const char *utf8, size_t len);
+/* `value`'s text as UTF-8 (lone surrogates as U+FFFD) into `buf` if its `cap` bytes hold it (no
+ * NUL after it): its length in UTF-8 either way, for a caller whose buffer was too small to make
+ * one that isn't and ask again; SIZE_MAX if `value` isn't a string. */
+JS_EXPORT size_t TVGetStringUTF8(JSContextRef ctx, JSValueRef value, char *buf, size_t cap);
+/* The same in Latin-1, a byte a character (a character past U+00FF its low byte, as Buffer's
+ * 'latin1' writes it): a string of `len` bytes; and `value`'s bytes, its length in them. */
+JS_EXPORT JSValueRef TVMakeLatin1String(JSContextRef ctx, const char *bytes, size_t len);
+JS_EXPORT size_t TVGetStringLatin1(JSContextRef ctx, JSValueRef value, char *buf, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

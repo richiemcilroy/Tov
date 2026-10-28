@@ -29,7 +29,13 @@ function bounds(buf, start, end) {
 
 // ---- UTF-8
 
+const nativeUtf8 = globalThis.__tov_native?.buffer;
+const nativeUtf8Length = nativeUtf8?.utf8Length;
+const nativeUtf8Write = nativeUtf8?.utf8Write;
+
 function byteLengthUtf8(s) {
+  // (natively, but for a few characters: a call into native code costs more than they do)
+  if (s.length > 32 && nativeUtf8Length !== undefined) return nativeUtf8Length(s);
   let n = 0;
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);
@@ -47,6 +53,10 @@ function byteLengthUtf8(s) {
 // become U+FFFD); returns the bytes written
 // (`read`, if given, gets the UTF-16 code units consumed at [0])
 function utf8Encode(buf, s, offset, max, read) {
+  if (s.length > 32 && read === undefined && nativeUtf8Write !== undefined) {
+    const n = nativeUtf8Write(buf, s, offset, max);
+    if (n >= 0) return n;
+  }
   let o = offset;
   const end = offset + max;
   let i = 0;

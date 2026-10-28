@@ -26,8 +26,12 @@
 #include <unistd.h>
 #include <wtf/FileHandle.h>
 #include <wtf/RunLoop.h>
+#include <wtf/SIMDUTF.h>
 #include <wtf/TimeZone.h>
+#include <wtf/text/ASCIIFastPath.h>
+#include <wtf/text/CString.h>
 #include <wtf/text/StringImpl.h>
+#include <unicode/utf16.h>
 
 using namespace JSC;
 
@@ -409,3 +413,151 @@ void TVReleaseMemory(JSContextRef ctx, bool dropCode)
     vm.heap.sweepSynchronously();
     WTF::releaseFastMallocFreeMemory();
 }
+
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+JSValueRef TVMakeString(JSContextRef ctx, const char* utf8, size_t len)
+{
+    JSGlobalObject* globalObject = toJS(ctx);
+    VM& vm = globalObject->vm();
+    TovLockScope locker(vm);
+    if (!len)
+        return toRef(globalObject, jsEmptyString(vm));
+    std::span<const Latin1Character> bytes { reinterpret_cast<const Latin1Character*>(utf8), len };
+    String text = charactersAreAllASCII(bytes) ? String(bytes) : String::fromUTF8ReplacingInvalidSequences(bytes);
+    return toRef(globalObject, jsString(vm, WTF::move(text)));
+}
+
+// (UTF-8 written straight from the string's characters, counted first: no copy between)
+template<typename CharacterType>
+static size_t tovUTF8Length(std::span<const CharacterType> chars)
+{
+    size_t len = chars.size();
+    for (size_t i = 0; i < chars.size(); i++) {
+        char16_t c = chars[i];
+        if (c < 0x80)
+            continue;
+        if (c < 0x800)
+            len += 1;
+        else if (U16_IS_LEAD(c) && i + 1 < chars.size() && U16_IS_TRAIL(chars[i + 1])) {
+            len += 2;
+            i++;
+        } else
+            len += 2;
+    }
+    return len;
+}
+
+template<typename CharacterType>
+static void tovWriteUTF8(std::span<const CharacterType> chars, char* out)
+{
+    for (size_t i = 0; i < chars.size(); i++) {
+        char32_t c = chars[i];
+        if (c < 0x80) {
+            *out++ = static_cast<char>(c);
+            continue;
+        }
+        if (c < 0x800) {
+            *out++ = static_cast<char>(0xc0 | (c >> 6));
+            *out++ = static_cast<char>(0x80 | (c & 0x3f));
+            continue;
+        }
+        if (U16_IS_SURROGATE(c)) {
+            if (U16_IS_LEAD(c) && i + 1 < chars.size() && U16_IS_TRAIL(chars[i + 1])) {
+                c = U16_GET_SUPPLEMENTARY(c, chars[i + 1]);
+                i++;
+                *out++ = static_cast<char>(0xf0 | (c >> 18));
+                *out++ = static_cast<char>(0x80 | ((c >> 12) & 0x3f));
+                *out++ = static_cast<char>(0x80 | ((c >> 6) & 0x3f));
+                *out++ = static_cast<char>(0x80 | (c & 0x3f));
+                continue;
+            }
+            c = 0xfffd;
+        }
+        *out++ = static_cast<char>(0xe0 | (c >> 12));
+        *out++ = static_cast<char>(0x80 | ((c >> 6) & 0x3f));
+        *out++ = static_cast<char>(0x80 | (c & 0x3f));
+    }
+}
+
+size_t TVGetStringUTF8(JSContextRef ctx, JSValueRef value, char* buf, size_t cap)
+{
+    JSGlobalObject* globalObject = toJS(ctx);
+    VM& vm = globalObject->vm();
+    TovLockScope locker(vm);
+    auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
+    JSValue v = toJS(globalObject, value);
+    if (!v.isString())
+        return SIZE_MAX;
+    // (a rope is resolved, as reading it anywhere would)
+    auto text = asString(v)->value(globalObject);
+    if (scope.exception()) [[unlikely]] {
+        scope.clearException();
+        return SIZE_MAX;
+    }
+    const String& s = text;
+    // (simdutf's, as for any of the engine's conversions; but for lone surrogates, which it
+    // doesn't write as U+FFFD)
+    if (s.is8Bit()) {
+        auto chars = s.span8();
+        if (charactersAreAllASCII(chars)) {
+            if (buf && chars.size() <= cap)
+                memcpy(buf, chars.data(), chars.size());
+            return chars.size();
+        }
+        auto latin1 = reinterpret_cast<const char*>(chars.data());
+        size_t len = simdutf::utf8_length_from_latin1(latin1, chars.size());
+        if (buf && len <= cap)
+            simdutf::convert_latin1_to_utf8(latin1, chars.size(), buf);
+        return len;
+    }
+    auto chars = s.span16();
+    if (simdutf::validate_utf16(chars.data(), chars.size())) {
+        size_t len = simdutf::utf8_length_from_utf16(chars.data(), chars.size());
+        if (buf && len <= cap)
+            simdutf::convert_valid_utf16_to_utf8(chars.data(), chars.size(), buf);
+        return len;
+    }
+    size_t len = tovUTF8Length(chars);
+    if (buf && len <= cap)
+        tovWriteUTF8(chars, buf);
+    return len;
+}
+
+JSValueRef TVMakeLatin1String(JSContextRef ctx, const char* bytes, size_t len)
+{
+    JSGlobalObject* globalObject = toJS(ctx);
+    VM& vm = globalObject->vm();
+    TovLockScope locker(vm);
+    if (!len)
+        return toRef(globalObject, jsEmptyString(vm));
+    return toRef(globalObject, jsString(vm, String(std::span<const Latin1Character> { reinterpret_cast<const Latin1Character*>(bytes), len })));
+}
+
+size_t TVGetStringLatin1(JSContextRef ctx, JSValueRef value, char* buf, size_t cap)
+{
+    JSGlobalObject* globalObject = toJS(ctx);
+    VM& vm = globalObject->vm();
+    TovLockScope locker(vm);
+    auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
+    JSValue v = toJS(globalObject, value);
+    if (!v.isString())
+        return SIZE_MAX;
+    auto text = asString(v)->value(globalObject);
+    if (scope.exception()) [[unlikely]] {
+        scope.clearException();
+        return SIZE_MAX;
+    }
+    const String& s = text;
+    size_t len = s.length();
+    if (buf && len <= cap) {
+        if (s.is8Bit())
+            memcpy(buf, s.span8().data(), len);
+        else {
+            auto chars = s.span16();
+            for (size_t i = 0; i < len; i++)
+                buf[i] = static_cast<char>(chars[i]);
+        }
+    }
+    return len;
+}
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_END

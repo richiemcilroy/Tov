@@ -19,6 +19,9 @@
 #else
 #include <JavaScriptCore/JavaScript.h>
 #endif
+#ifdef TV_JSC_OWN
+#include <JavaScriptCore/TovAPI.h>
+#endif
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -685,12 +688,17 @@ NAPI_EXTERN napi_status napi_create_string_utf8(napi_env env, const char *str, s
 NAPI_EXTERN napi_status napi_create_string_latin1(napi_env env, const char *str, size_t length, napi_value *r) {
     ARG(env, r && (str || length == 0));
     size_t n = length == NAPI_AUTO_LENGTH ? strlen(str) : length;
+#ifdef TOV_API_STRINGS
+    *r = tv_napi_hold(TVMakeLatin1String(env->ctx, str ? str : "", n));
+    return OK(env);
+#else
     JSChar *u = malloc((n ? n : 1) * sizeof *u);
     if (!u) abort();
     for (size_t i = 0; i < n; i++) u[i] = (unsigned char)str[i];
     JSStringRef s = JSStringCreateWithCharacters(u, n);
     free(u);
     return tv_napi_make_string(env, s, r);
+#endif
 }
 
 NAPI_EXTERN napi_status napi_create_string_utf16(napi_env env, const char16_t *str, size_t length, napi_value *r) {
@@ -730,6 +738,17 @@ static napi_status tv_napi_utf16(napi_env env, napi_value value, JSStringRef *ou
 }
 
 NAPI_EXTERN napi_status napi_get_value_string_utf8(napi_env env, napi_value value, char *buf, size_t bufsize, size_t *result) {
+#ifdef TOV_API_STRINGS
+    /* (straight from the engine when it all fits, or only its length is asked) */
+    if (value) {
+        size_t k = TVGetStringUTF8(env->ctx, V(value), buf, buf ? bufsize : 0);
+        if (k != SIZE_MAX && (!buf || k < bufsize)) {
+            if (buf) buf[k] = 0;
+            if (result) *result = k;
+            return OK(env);
+        }
+    }
+#endif
     JSStringRef s;
     napi_status st = tv_napi_utf16(env, value, &s);
     if (st != napi_ok) return st;
@@ -762,6 +781,16 @@ NAPI_EXTERN napi_status napi_get_value_string_utf8(napi_env env, napi_value valu
 }
 
 NAPI_EXTERN napi_status napi_get_value_string_latin1(napi_env env, napi_value value, char *buf, size_t bufsize, size_t *result) {
+#ifdef TOV_API_STRINGS
+    if (value) {
+        size_t k = TVGetStringLatin1(env->ctx, V(value), buf, buf ? bufsize : 0);
+        if (k != SIZE_MAX && (!buf || k < bufsize)) {
+            if (buf) buf[k] = 0;
+            if (result) *result = k;
+            return OK(env);
+        }
+    }
+#endif
     JSStringRef s;
     napi_status st = tv_napi_utf16(env, value, &s);
     if (st != napi_ok) return st;

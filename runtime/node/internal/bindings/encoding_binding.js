@@ -14,7 +14,10 @@ function encodeInto(source, dest) {
   encodeIntoResults[0] = read[0];
 }
 
+const nativeUtf8Encode = globalThis.__tov_native?.buffer?.utf8Encode;
+
 function encodeUtf8String(s) {
+  if (s.length > 32 && nativeUtf8Encode !== undefined) return nativeUtf8Encode(s);
   const out = new Uint8Array(byteLengthUtf8(s));
   utf8Encode(out, s, 0, out.length);
   return out;

@@ -16,6 +16,9 @@
 #else
 #include <JavaScriptCore/JavaScript.h>
 #endif
+#ifdef TV_JSC_OWN
+#include <JavaScriptCore/TovAPI.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
@@ -74,12 +77,51 @@ static double arg_num(JSContextRef ctx, size_t n, const JSValueRef a[], size_t i
 
 /* argument i as a NUL-terminated UTF-8 string (malloc'd; NULL if it's not a string) */
 static char *arg_cstr(JSContextRef ctx, size_t n, const JSValueRef a[], size_t i) {
+#ifdef TOV_API_STRINGS
+    /* (its UTF-8 straight from the engine: a path's ASCII is copied as it is) */
+    if (i >= n) return NULL;
+    char small[256];
+    size_t len = TVGetStringUTF8(ctx, a[i], small, sizeof small);
+    if (len == SIZE_MAX) return NULL;
+    char *out = malloc(len + 1);
+    if (len < sizeof small) memcpy(out, small, len);
+    else TVGetStringUTF8(ctx, a[i], out, len);
+    out[len] = 0;
+    return out;
+#else
     if (i >= n || !JSValueIsString(ctx, a[i])) return NULL;
     JSStringRef s = JSValueToStringCopy(ctx, a[i], NULL);
     size_t cap = JSStringGetMaximumUTF8CStringSize(s);
     char *out = malloc(cap);
     JSStringGetUTF8CString(s, out, cap);
     JSStringRelease(s);
+    return out;
+#endif
+}
+
+/* v as UTF-8 (converted to a string as String(v) does, if it isn't one): in `small` when it fits
+ * its `cap` bytes, else malloc'd, for the caller to free when it isn't `small` */
+static char *tv_node_text(JSContextRef ctx, JSValueRef v, char *small, size_t cap, size_t *len) {
+#ifdef TOV_API_STRINGS
+    size_t k = TVGetStringUTF8(ctx, v, small, cap);
+    if (k != SIZE_MAX) {
+        *len = k;
+        if (k < cap) {
+            small[k] = 0;
+            return small;
+        }
+        char *out = malloc(k + 1);
+        TVGetStringUTF8(ctx, v, out, k);
+        out[k] = 0;
+        return out;
+    }
+#endif
+    JSStringRef s = JSValueToStringCopy(ctx, v, NULL);
+    size_t c = s ? JSStringGetMaximumUTF8CStringSize(s) : 1;
+    char *out = malloc(c);
+    *len = s ? JSStringGetUTF8CString(s, out, c) - 1 : 0;
+    out[*len] = 0;
+    if (s) JSStringRelease(s);
     return out;
 }
 
@@ -372,13 +414,9 @@ NATIVE(n_write) {
     if (n < 2) return num(ctx, 0);
     uint8_t *p = NULL;
     size_t len = 0;
-    char *text = NULL;
+    char *text = NULL, small[1024];
     if (JSValueIsString(ctx, a[1])) {
-        JSStringRef s = JSValueToStringCopy(ctx, a[1], NULL);
-        size_t cap = JSStringGetMaximumUTF8CStringSize(s);
-        text = malloc(cap);
-        len = JSStringGetUTF8CString(s, text, cap) - 1;
-        JSStringRelease(s);
+        text = tv_node_text(ctx, a[1], small, sizeof small, &len);
         p = (uint8_t *)text;
     } else if (!tv_js_bytes_view(a[1], &p, &len)) {
         return num(ctx, 0);
@@ -394,13 +432,13 @@ NATIVE(n_write) {
             ssize_t w = write(fd, p + off, len - off);
             if (w < 0) {
                 if (errno == EINTR) continue;
-                free(text);
+                if (text != small) free(text);
                 return tv_node_throw(ctx, exc, errno, "write", NULL, NULL);
             }
             off += (size_t)w;
         }
     }
-    free(text);
+    if (text != small) free(text);
     return num(ctx, (double)len);
 }
 
@@ -1513,11 +1551,9 @@ NATIVE(n_fs_write_utf8) {
     char *path;
     int fd = tv_node_open_arg(ctx, n, a, 0, (int)arg_num(ctx, n, a, 2, O_WRONLY | O_CREAT | O_TRUNC), (int)arg_num(ctx, n, a, 3, 0666), &owned, &path);
     if (fd < 0) { int e = errno; JSValueRef r = tv_node_throw(ctx, exc, e, "open", path, NULL); free(path); return r; }
-    JSStringRef s = JSValueToStringCopy(ctx, a[1], NULL);
-    size_t cap = JSStringGetMaximumUTF8CStringSize(s);
-    char *text = malloc(cap);
-    size_t len = JSStringGetUTF8CString(s, text, cap) - 1;
-    JSStringRelease(s);
+    char small[1024];
+    size_t len;
+    char *text = tv_node_text(ctx, a[1], small, sizeof small, &len);
     size_t off = 0;
     JSValueRef out = undef(ctx);
     while (off < len) {
@@ -1529,7 +1565,7 @@ NATIVE(n_fs_write_utf8) {
         }
         off += (size_t)w;
     }
-    free(text);
+    if (text != small) free(text);
     if (owned) close(fd);
     free(path);
     return out;
@@ -1540,12 +1576,12 @@ NATIVE(n_fs_exists) {
     /* (a string path converted on the stack: apps check paths per request, Cap's media server
      * ~16 cgroup files per probe) */
     if (n > 0 && JSValueIsString(ctx, a[0])) {
-        JSStringRef s = JSValueToStringCopy(ctx, a[0], NULL);
         char buf[1024];
-        bool fits = JSStringGetMaximumUTF8CStringSize(s) <= sizeof buf;
-        if (fits) JSStringGetUTF8CString(s, buf, sizeof buf);
-        JSStringRelease(s);
-        if (fits) return JSValueMakeBoolean(ctx, access(buf, F_OK) == 0);
+        size_t len;
+        char *path = tv_node_text(ctx, a[0], buf, sizeof buf, &len);
+        bool ok = strlen(path) == len && access(path, F_OK) == 0;
+        if (path != buf) free(path);
+        return JSValueMakeBoolean(ctx, ok);
     }
     char *path = arg_path(ctx, n, a, 0);
     if (!path) return JSValueMakeBoolean(ctx, false);
@@ -2314,7 +2350,6 @@ NATIVE(n_heap_stats) {
     UNUSED;
     double v[3] = {0, 0, 0};
 #ifdef TV_JSC_OWN
-    extern void TVHeapStatistics(JSContextRef, double[3]);
     TVHeapStatistics(ctx, v);
 #else
     static JSObjectRef (*stats)(JSContextRef);
@@ -3801,13 +3836,13 @@ static tv_int tv_node_fetch_id(JSContextRef ctx, size_t n, const JSValueRef a[])
 }
 
 static tv_str tv_node_arg_str(JSContextRef ctx, size_t n, const JSValueRef a[], size_t i) {
+    tv_str r;
+    if (i >= n) return TV_EMPTY_STR;
+    if (tv_js_as_str(a[i], &r)) return r;
     uint8_t *p;
     size_t len;
-    if (i < n && JSValueIsObject(ctx, a[i]) && tv_js_bytes_view(a[i], &p, &len)) return tv_str_from((const char *)p, len);
-    char *s = i < n && !JSValueIsNull(ctx, a[i]) && !JSValueIsUndefined(ctx, a[i]) ? arg_cstr(ctx, n, a, i) : NULL;
-    tv_str r = s ? tv_str_from(s, strlen(s)) : TV_EMPTY_STR;
-    free(s);
-    return r;
+    if (JSValueIsObject(ctx, a[i]) && tv_js_bytes_view(a[i], &p, &len)) return tv_str_from((const char *)p, len);
+    return TV_EMPTY_STR;
 }
 
 /* fetchStart(method, url, wire headers, body bytes|string|null, redirect, flags, ca, unix, proxy) -> handle */
@@ -3901,9 +3936,8 @@ NATIVE(n_fetch_body) {
 }
 
 static JSValueRef tv_node_str_value(JSContextRef ctx, tv_str s) {
-    JSStringRef js = JSStringCreateWithUTF8CString(s.p->data);
-    JSValueRef v = JSValueMakeString(ctx, js);
-    JSStringRelease(js);
+    (void)ctx;
+    JSValueRef v = tv_js_str(s.p->data, (size_t)s.p->len);
     tv_str_release(s);
     return v;
 }
@@ -3990,6 +4024,9 @@ typedef struct {
 
 /* bytes as a JS string, one char per byte (latin1: header bytes survive as they are) */
 static JSValueRef tv_node_latin1(JSContextRef ctx, const char *p, size_t n) {
+#ifdef TOV_API_STRINGS
+    return TVMakeLatin1String(ctx, p, n);
+#else
     JSChar stack[512];
     JSChar *buf = n <= 512 ? stack : malloc(n * sizeof(JSChar));
     for (size_t i = 0; i < n; i++) buf[i] = (unsigned char)p[i];
@@ -3998,6 +4035,7 @@ static JSValueRef tv_node_latin1(JSContextRef ctx, const char *p, size_t n) {
     JSValueRef v = JSValueMakeString(ctx, s);
     JSStringRelease(s);
     return v;
+#endif
 }
 
 static void tv_node_http_request(tv_env *env, tv_str method, tv_str target, tv_str headers, tv_str body) {
@@ -4042,6 +4080,20 @@ NATIVE(n_http_listen) {
 
 /* a JS string's bytes: latin1 (a byte per char) or UTF-8; the caller frees them */
 static char *tv_node_string_bytes(JSContextRef ctx, JSValueRef v, bool latin1, size_t *len) {
+#ifdef TOV_API_STRINGS
+    /* (8-bit text copied as it is, or as UTF-8 straight from the engine) */
+    char small[4096];
+    size_t k = latin1 ? TVGetStringLatin1(ctx, v, small, sizeof small) : TVGetStringUTF8(ctx, v, small, sizeof small);
+    if (k != SIZE_MAX) {
+        char *out = malloc(k + 1);
+        if (k <= sizeof small) memcpy(out, small, k);
+        else if (latin1) TVGetStringLatin1(ctx, v, out, k);
+        else TVGetStringUTF8(ctx, v, out, k);
+        out[k] = 0;
+        *len = k;
+        return out;
+    }
+#endif
     JSStringRef js = JSValueToStringCopy(ctx, v, NULL);
     if (!js) {
         *len = 0;
@@ -4594,6 +4646,46 @@ NATIVE(n_buf_utf8_decode) {
     return end > start ? tv_js_str((const char *)p + start, end - start) : tv_js_str("", 0);
 }
 
+#ifdef TOV_API_STRINGS
+/* utf8Encode(string) -> Uint8Array of its UTF-8 (lone surrogates as U+FFFD, as TextEncoder);
+ * utf8Length(string) -> how many bytes that is. The engine's: ASCII is copied as it is. */
+NATIVE(n_buf_utf8_encode) {
+    UNUSED;
+    char small[4096];
+    size_t k = n ? TVGetStringUTF8(ctx, a[0], small, sizeof small) : SIZE_MAX;
+    if (k == SIZE_MAX) return undef(ctx);
+    char *text = small;
+    if (k > sizeof small) {
+        text = malloc(k);
+        TVGetStringUTF8(ctx, a[0], text, k);
+    }
+    JSValueRef out = tv_js_bytes_copy(text, k);
+    if (text != small) free(text);
+    return out;
+}
+
+/* utf8Write(bytes, string, offset, max) -> the bytes its UTF-8 took at offset, or -1 if that's
+ * more than max (or than there's room for): the caller writes what fits */
+NATIVE(n_buf_utf8_write) {
+    UNUSED;
+    uint8_t *p;
+    size_t len;
+    if (n < 4 || !tv_js_bytes_view(a[0], &p, &len)) return num(ctx, -1);
+    double off = arg_num(ctx, n, a, 2, 0), max = arg_num(ctx, n, a, 3, 0);
+    if (!(off >= 0 && off <= (double)len && max >= 0)) return num(ctx, -1);
+    size_t o = (size_t)off, room = len - o;
+    if (max < (double)room) room = (size_t)max;
+    size_t k = TVGetStringUTF8(ctx, a[1], (char *)p + o, room);
+    return num(ctx, k == SIZE_MAX || k > room ? -1 : (double)k);
+}
+
+NATIVE(n_buf_utf8_length) {
+    UNUSED;
+    size_t k = n ? TVGetStringUTF8(ctx, a[0], NULL, 0) : SIZE_MAX;
+    return k == SIZE_MAX ? undef(ctx) : num(ctx, (double)k);
+}
+#endif
+
 /* ------------------------------------------------------------------ install */
 
 
@@ -4646,6 +4738,11 @@ void tv_node_install(JSContextRef ctx, JSObjectRef native) {
 
     JSObjectRef buf = JSObjectMake(ctx, NULL, NULL);
     tv_js_def(ctx, buf, "utf8Decode", n_buf_utf8_decode);
+#ifdef TOV_API_STRINGS
+    tv_js_def(ctx, buf, "utf8Encode", n_buf_utf8_encode);
+    tv_js_def(ctx, buf, "utf8Length", n_buf_utf8_length);
+    tv_js_def(ctx, buf, "utf8Write", n_buf_utf8_write);
+#endif
     set(ctx, native, "buffer", buf);
 
     tv_node_fs_install(ctx, native);
