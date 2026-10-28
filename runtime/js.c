@@ -197,8 +197,17 @@ extern void objc_autoreleasePoolPop(void *pool);
 extern char **environ;
 
 /* (smaller modules parse faster than a cache is read: a program of only small modules, such as
- * the 7 KB the runtime's own bootstrap is, starts ~1 ms sooner without one) */
+ * the 7 KB the runtime's own bootstrap is, starts ~1 ms sooner without one, and one of a few
+ * packages holds less. A program of hundreds of modules caches its own and its packages' small
+ * ones too: they add up, and their functions are compiled again as they're called. Cap's media
+ * server, 795 modules with the runtime's, starts in ~79 ms with them cached, ~84 ms without; zod
+ * alone is 300. (The count is the blob's; counting a program's own would read every module's
+ * name, which lie among their sources: ~1.6 MB more of the blob paged in.)) */
 #define TV_JSC_MIN_BYTES 8192
+#define TV_JSC_MANY_MODULES 400
+static bool tv_jsc_wanted(uint32_t i, size_t len) {
+    return len >= TV_JSC_MIN_BYTES || (tv_js_nmodules() >= TV_JSC_MANY_MODULES && strncmp(tv_js_module_name(i), "node:", 5) != 0);
+}
 
 static struct {
     int state;              /* 0 not yet looked, 1 on, -1 off */
@@ -389,7 +398,7 @@ static void tv_jsc_set_file(id script, const char *file) {
 static bool tv_jsc_load(JSContextRef ctx, uint32_t i, JSValueRef *out, JSValueRef *exc) {
     size_t len;
     tv_js_module_src(i, &len);
-    if (len < TV_JSC_MIN_BYTES || !tv_jsc_on()) return false;
+    if (!tv_jsc_wanted(i, len) || !tv_jsc_on()) return false;
     char base[1100], file[1110], text[1110];
     tv_jsc_file(i, base, sizeof base);
     snprintf(file, sizeof file, "%s.jsc", base);
@@ -483,14 +492,14 @@ static JSValueRef tv_jsc_eval(JSContextRef ctx, uint32_t i, bool *cached, JSValu
     const char *src = tv_js_module_src(i, &len);
     int fd = -1;
     char base[1100], file[1110];
-    if (len >= TV_JSC_MIN_BYTES && tv_jsc_on()) {
+    if (tv_jsc_wanted(i, len) && tv_jsc_on()) {
         tv_jsc_file(i, base, sizeof base);
         snprintf(file, sizeof file, "%s.jsc", base);
         fd = open(file, O_RDONLY | O_CLOEXEC);
     }
     JSValueRef r = TVEvaluateScript(ctx, src, len, tv_js_module_name(i), fd, cached, exc);
     if (fd >= 0) close(fd);
-    if (len >= TV_JSC_MIN_BYTES && tv_jsc.state > 0 && !*cached) tv_jsc_queue(i);
+    if (tv_jsc_wanted(i, len) && tv_jsc.state > 0 && !*cached) tv_jsc_queue(i);
     return r;
 }
 
