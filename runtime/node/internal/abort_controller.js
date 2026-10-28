@@ -7,6 +7,7 @@ const { primordials, internalBinding } = require("internal/bootstrap");
 
 const {
   ArrayPrototypePush,
+  ArrayPrototypeSlice,
   ObjectAssign,
   ObjectDefineProperties,
   ObjectDefineProperty,
@@ -14,6 +15,7 @@ const {
   PromiseResolve,
   PromiseWithResolvers,
   SafeFinalizationRegistry,
+  SafeMap,
   SafeSet,
   SafeWeakRef,
   Symbol,
@@ -87,7 +89,6 @@ function lazyMessageChannel() {
   return new _MessageChannel();
 }
 
-const clearTimeoutRegistry = new SafeFinalizationRegistry(clearTimeout);
 const dependantSignalsCleanupRegistry = new SafeFinalizationRegistry(
   ({ sourceSignalRef, dependantSignalRef, sourceSignalsCleanupToken }) => {
     sourceSignalsCleanupRegistry.unregister(sourceSignalsCleanupToken);
@@ -202,11 +203,46 @@ function followCompositeSignal(signal) {
 // over the WeakRef rather than directly over the AbortSignal, and we unref
 // the created timer object. Separately, we add the signal to a
 // FinalizerRegistry that will clear the timeout when the signal is gc'd.
-function setWeakAbortSignalTimeout(weakRef, delay) {
-  const timeout = setTimeout(() => {
-    const signal = weakRef.deref();
+// Tov: AbortSignal.timeout's signals share one timer for each delay, and a queue of the signals
+// waiting on it, held weakly, in the order of their deadlines (one delay's come in order). A
+// signal collected before its time is passed over then; Node.js gives each its own timer, and a
+// finalizer to clear it (a server giving each request's fetch a 10 s timeout held ~54,000 of each
+// under load, every collection checking the finalizers).
+const timeoutQueues = new SafeMap();
+let perfNow;
+
+function timeoutNow() {
+  perfNow ??= require('internal/perf/utils').now;
+  return perfNow();
+}
+
+function scheduleTimeoutSignal(signal, delay) {
+  let queue = timeoutQueues.get(delay);
+  if (queue === undefined) {
+    queue = { items: [], head: 0, timer: null };
+    timeoutQueues.set(delay, queue);
+  }
+  queue.items.push(timeoutNow() + delay, new SafeWeakRef(signal));
+  if (queue.timer === null) armTimeoutQueue(queue, delay, delay);
+}
+
+function armTimeoutQueue(queue, delay, wait) {
+  queue.timer = setTimeout(fireTimeoutQueue, wait, queue, delay);
+  queue.timer.unref();
+}
+
+function fireTimeoutQueue(queue, delay) {
+  queue.timer = null;
+  const items = queue.items;
+  const time = timeoutNow();
+  let i = queue.head;
+  // (an abort's listeners may add more: they wait behind these)
+  while (i < items.length && items[i] <= time) {
+    const signal = items[i + 1].deref();
+    items[i + 1] = undefined;
+    i += 2;
+    queue.head = i;
     if (signal !== undefined) {
-      clearTimeoutRegistry.unregister(signal);
       gcPersistentSignals.delete(signal);
       abortSignal(
         signal,
@@ -214,9 +250,16 @@ function setWeakAbortSignalTimeout(weakRef, delay) {
           'The operation was aborted due to timeout',
           'TimeoutError'));
     }
-  }, delay);
-  timeout.unref();
-  return timeout;
+  }
+  if (queue.head >= items.length) {
+    timeoutQueues.delete(delay);
+    return;
+  }
+  if (queue.head >= 1024 && queue.head * 2 >= items.length) {
+    queue.items = ArrayPrototypeSlice(items, queue.head);
+    queue.head = 0;
+  }
+  armTimeoutQueue(queue, delay, queue.items[queue.head] - time);
 }
 
 class AbortSignal extends EventTarget {
@@ -301,10 +344,7 @@ class AbortSignal extends EventTarget {
     validateUint32(delay, 'delay', false);
     const signal = new AbortSignal(kDontThrowSymbol);
     signal[kTimeout] = true;
-    clearTimeoutRegistry.register(
-      signal,
-      setWeakAbortSignalTimeout(new SafeWeakRef(signal), delay),
-      signal);
+    scheduleTimeoutSignal(signal, delay);
     return signal;
   }
 
