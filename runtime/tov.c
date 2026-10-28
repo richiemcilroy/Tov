@@ -12278,6 +12278,8 @@ static void tv_fc_start_tls(tv_fc *c) {
     tv_fc_handshake(c);
 }
 
+/* idle and opening connections the pool is kept topped up to (tv_fc_spare) */
+#define TV_FC_SPARES 3
 static void tv_fc_spare(tv_fc *old, tv_fr *r);
 
 /* Connects to the resolved addresses (DNS done). */
@@ -12299,7 +12301,7 @@ static void tv_fr_connect(tv_fr *r, const tv_addrs *addrs) {
     r->c = c;
     c->r = r;
     /* (connecting here, the pool was empty: the next request finds one waiting) */
-    if (!c->connecting && !c->origin->sparing) tv_fc_spare(c, r);
+    if (!c->connecting) tv_fc_spare(c, r);
     if (!c->connecting) { tv_fc_connected(c); return; }
     /* make the ClientHello (the key shares are the costly part) while TCP connects: it waits
      * in the TLS write buffer until the socket is writable */
@@ -12314,7 +12316,7 @@ static void tv_fr_connect(tv_fr *r, const tv_addrs *addrs) {
 static void tv_fc_spare(tv_fc *old, tv_fr *r) {
     tv_origin *o = old->origin;
     if (!tv_fetch_offload || old->tls || r->https || r->via_proxy || r->unix_path.p->len || old->connecting || old->fd < 0) return;
-    if (o->nidle || o->sparing) return;
+    if (o->nidle + o->sparing >= TV_FC_SPARES) return;
     if (!tv_sk_start()) return;
     tv_fc *c = tv_alloc(sizeof *c);
     memset(c, 0, sizeof *c);
@@ -12453,7 +12455,7 @@ static void tv_fr_step(tv_fr *r) {
         o->nidle--;
         if (c->dead) continue;
         /* (the last idle one taken: the next request finds one waiting) */
-        if (!o->idle && !o->sparing) tv_fc_spare(c, r);
+        tv_fc_spare(c, r);
         tv_fr_send(r, c);
         return;
     }
