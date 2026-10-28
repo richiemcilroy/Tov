@@ -1441,19 +1441,42 @@ NATIVE(n_fs_read_utf8) {
     char *path;
     int fd = tv_node_open_arg(ctx, n, a, 0, (int)arg_num(ctx, n, a, 1, O_RDONLY), 0666, &owned, &path);
     if (fd < 0) { int e = errno; JSValueRef r = tv_node_throw(ctx, exc, e, "open", path, NULL); free(path); return r; }
+    /* (a small file, as most read whole are, and those that report no size, as /proc's and
+     * cgroups' do, read into the stack first: a 64 KB buffer each was most of their cost. Its
+     * size is asked only once it outgrows that; a directory fails the read with EISDIR.) */
+    char small[16384];
     tv_sb sb = {0};
-    struct stat st;
-    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) tv_sb_grow(&sb, (size_t)st.st_size + 1);
-    else if (fstat(fd, &st) == 0 && S_ISDIR(st.st_mode)) {
-        if (owned) close(fd);
-        JSValueRef r = tv_node_throw(ctx, exc, EISDIR, "read", NULL, NULL);
-        free(path);
-        return r;
-    }
+    size_t len = 0;
+    bool heap = false;
     for (;;) {
-        if (sb.cap - sb.len < 65536) tv_sb_grow(&sb, sb.len + 65536);
-        ssize_t k = read(fd, sb.data + sb.len, sb.cap - sb.len);
-        if (k > 0) { sb.len += (size_t)k; continue; }
+        char *at;
+        size_t room;
+        if (!heap) {
+            at = small + len;
+            room = sizeof small - len;
+            if (room == 0) {
+                /* (outgrew the stack: on to the heap with what's read, room for all of a file) */
+                struct stat st;
+                size_t want = len + 65536;
+                if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && (size_t)st.st_size + 1 > want) want = (size_t)st.st_size + 1;
+                tv_sb_grow(&sb, want);
+                memcpy(sb.data, small, len);
+                sb.len = len;
+                heap = true;
+                continue;
+            }
+        } else {
+            /* (a file of known size was given a byte more: the read that finds its end) */
+            if (sb.cap == sb.len) tv_sb_grow(&sb, sb.len + 65536);
+            at = sb.data + sb.len;
+            room = sb.cap - sb.len;
+        }
+        ssize_t k = read(fd, at, room);
+        if (k > 0) {
+            if (heap) sb.len += (size_t)k;
+            else len += (size_t)k;
+            continue;
+        }
         if (k == 0) break;
         if (errno == EINTR) continue;
         int e = errno;
@@ -1465,7 +1488,7 @@ NATIVE(n_fs_read_utf8) {
     }
     if (owned) close(fd);
     free(path);
-    JSValueRef out = tv_js_str(sb.data ? sb.data : "", sb.len);
+    JSValueRef out = heap ? tv_js_str(sb.data ? sb.data : "", sb.len) : tv_js_str(small, len);
     tv_sb_free(&sb);
     return out;
 }
