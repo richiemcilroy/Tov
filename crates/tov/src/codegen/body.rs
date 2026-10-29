@@ -1439,6 +1439,21 @@ impl<'c, 'a> Gen<'c, 'a> {
                             }
                         }
                     }
+                    // (`Array.from(x, (v, i) => ...)` calls its callback while it runs, and keeps it no
+                    // longer: an arrow given for it lives on the stack)
+                    if let Some(fact) = facts.calls.get(&e)
+                        && let Callee::Builtin { ns: Some(ns), name } = fact.callee
+                        && self.c.interner.get(ns) == "Array"
+                        && self.c.interner.get(name) == "from"
+                        && let Some(a) = args.get(1)
+                        && matches!(&ast.expr(a.expr).kind, ExprKind::Arrow(f) if !f.is_async)
+                    {
+                        let mut nested = Vec::new();
+                        collect_exprs_expr(ast, a.expr, &mut nested);
+                        if !nested.iter().any(|&x| x != a.expr && matches!(ast.expr(x).kind, ExprKind::Arrow(_))) {
+                            stack_arrows.insert(a.expr);
+                        }
+                    }
                     // (a function or method that only calls its callback: an arrow given for it
                     // lives on the stack)
                     if facts.calls.get(&e).is_some_and(|f| matches!(f.callee, Callee::Fn(..) | Callee::ClassMethod { .. } | Callee::StaticMethod(..))) {
