@@ -381,7 +381,9 @@ function extractBody(init) {
 async function bodyBytes(body) {
   if (body === null) return new Uint8Array(0);
   if (body instanceof Uint8Array) return body;
-  if (body instanceof Blob()) return new Uint8Array(await body.arrayBuffer());
+  // (bytes(): a Bun.file's are the file as read, where arrayBuffer() copies them again — a
+  // 400 MB upload held twice)
+  if (body instanceof Blob()) return typeof body.bytes === 'function' ? body.bytes() : new Uint8Array(await body.arrayBuffer());
   if (body instanceof FormBody) return encodeForm(body);
   const chunks = [];
   for await (const c of body) chunks.push(typeof c === 'string' ? Buffer.from(c) : c);
