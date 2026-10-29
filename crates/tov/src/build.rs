@@ -271,6 +271,33 @@ fn use_lld(cc: &str) -> bool {
     beside || std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|d| d.join("ld.lld").is_file()))
 }
 
+/// Linux without lld: whether the system's ld can lay out functions in an order of ours
+/// (`--section-ordering-file`, GNU ld 2.43 and later).
+fn gnu_ld_orders() -> bool {
+    if cfg!(target_vendor = "apple") || cfg!(windows) {
+        return false;
+    }
+    Command::new("ld").arg("--help").output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("--section-ordering-file"))
+}
+
+/// The engine's function order (a symbol per line, as lld takes it) as GNU ld's section ordering
+/// script: each function is its own section (`-ffunction-sections`), `.text.<symbol>`. Written
+/// once beside the cache's other files, by the order's hash.
+fn gnu_order_script(order: &Path, hash: &str) -> Option<PathBuf> {
+    let path = cache_dir().join("c").join(format!("order-{hash}.ld"));
+    if cached(&path) {
+        return Some(path);
+    }
+    let text = std::fs::read_to_string(order).ok()?;
+    let mut script = String::from(".text : {\n");
+    for sym in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        script.push_str(&format!("  *(.text.{sym})\n"));
+    }
+    script.push_str("}\n");
+    write_new(&path, |t| std::fs::write(t, &script)).ok()?;
+    Some(path)
+}
+
 pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, BuildError> {
     prune_cache();
     let t0 = Instant::now();
@@ -437,9 +464,12 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     } else {
         String::new()
     };
-    // (the function order, which only lld follows)
+    // (the engine's function order, so the code a program runs is on as few pages as can be: lld
+    // follows the list as it is, GNU ld 2.43+ as a script made from it, ~7 MB less of an npm
+    // service's memory)
     let order = jsc.as_ref().and_then(|j| j.order.as_ref()).filter(|_| lld);
-    let order_key = order.map(|o| o.1.as_str()).unwrap_or_default();
+    let gnu_order = jsc.as_ref().and_then(|j| j.order.as_ref()).filter(|_| !lld && gnu_ld_orders()).and_then(|(p, h)| gnu_order_script(p, h).map(|s| (s, h.clone())));
+    let order_key = order.map(|o| o.1.as_str()).or(gnu_order.as_ref().map(|o| o.1.as_str())).unwrap_or_default();
     let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), LINK_FLAGS.as_bytes(), if lld { b"lld" } else { b"ld" }, tls_key.as_bytes(), js_key.as_bytes(), addon_key.as_bytes(), re_key.as_bytes(), order_key.as_bytes()]);
     let dir = cache_dir();
     // A program with addons gets a directory of its own, the addons beside it.
@@ -547,6 +577,9 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     cmd.args(&re_objs);
     if lld {
         cmd.arg("-fuse-ld=lld");
+    }
+    if let Some((path, _)) = &gnu_order {
+        cmd.arg(format!("-Wl,--section-ordering-file={}", path.display()));
     }
     if let Some((path, _)) = order {
         cmd.arg(format!("-Wl,--symbol-ordering-file={}", path.display())).arg("-Wl,--no-warn-symbol-ordering");
