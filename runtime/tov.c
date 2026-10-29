@@ -8771,6 +8771,21 @@ void tv_promise_reject(tv_promise *p, void *err) {
     p->state = TV_REJECTED;
     if (!p->handled && !p->waiter && !p->reported) {
         if (tv_nunhandled == tv_unhandled_cap) {
+            /* (the ones awaited since go first: a loop that rejects and catches without ever
+             * yielding would otherwise keep every one, error and all, until it ends) */
+            size_t k = 0;
+            for (size_t i = 0; i < tv_nunhandled; i++) {
+                tv_promise *q = tv_unhandled[i];
+                if (q->handled) {
+                    q->reported = false;
+                    tv_promise_release(q);
+                } else {
+                    tv_unhandled[k++] = q;
+                }
+            }
+            tv_nunhandled = k;
+        }
+        if (tv_nunhandled == tv_unhandled_cap) {
             tv_unhandled_cap = tv_unhandled_cap ? tv_unhandled_cap * 2 : 8;
             tv_unhandled = tv_realloc(tv_unhandled, tv_unhandled_cap * sizeof *tv_unhandled);
         }
