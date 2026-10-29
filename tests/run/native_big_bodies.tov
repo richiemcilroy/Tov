@@ -1,0 +1,38 @@
+// Big bodies read whole (received on threads of their own on Linux): their length, several at
+// once, small requests after them on the same connections, an abort partway, and one after.
+const big = "abcdefgh".repeat(512 * 1024)
+
+async function main() throws Error {
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const path = new URL(req.url).pathname
+      return new Response(path === "/small" ? "ok" : big)
+    },
+  })
+  const base = `http://127.0.0.1:${server.port}`
+  const one = try await (try await fetch(base + "/big")).text()
+  console.log("one", one.length, one === big)
+  const many: Promise<string, Error>[] = []
+  for (let i = 0; i < 6; i++) many.push((try await fetch(base + "/big")).text())
+  const all = try await Promise.all(many)
+  console.log("many", all.length, all.every((s) => s.length === big.length))
+  for (let i = 0; i < 3; i++) {
+    const s = try await (try await fetch(base + "/small")).text()
+    console.log("small", s)
+  }
+  const ac = new AbortController()
+  const res = try await fetch(base + "/big", { signal: ac.signal })
+  const pending = res.text()
+  ac.abort()
+  // (whether the abort lands before the body is all in depends on timing: either is right)
+  try {
+    const t = try await pending
+    const _ = t.length
+  } catch (e) {
+    const _ = (e as Error).name
+  }
+  const again = try await (try await fetch(base + "/big")).text()
+  console.log("after abort", again.length)
+  server.stop()
+}

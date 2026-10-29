@@ -11245,6 +11245,7 @@ typedef struct tv_fr {
      * it's decoded). */
     bool whole, draining;
     int64_t remaining;
+    struct tv_bk *bulk;        /* the rest of a big body being received on a thread (tv_bk_start) */
     /* The body is checked as UTF-8 while it arrives (still in cache): text() then needn't read
      * it again. A second pass over a big body right after it arrived also slows the next
      * transfer (it evicts what the kernel's copy needs). */
@@ -11277,6 +11278,7 @@ struct tv_fc {
     tv_sb ctl;                 /* the CONNECT request, while it's being sent */
     size_t ctl_off;
     bool dialing;              /* a spare the socket helper is opening (tv_fc_spare) */
+    bool bulk;                 /* a thread is receiving a body on it (tv_bk_start) */
     bool spare;                /* ... and, still connecting, one waiting to join the pool */
     int dial_rc, dial_err;     /* ... connect's result */
     struct tv_fc *dial_next;
@@ -12412,6 +12414,8 @@ static void tv_fc_spare(tv_fc *old, tv_fr *r) {
 }
 
 /* The loop: spares the helper opened, into their origins' pools (or let go). */
+static bool tv_bk_finish_all(void);
+
 static void tv_sk_ready(tv_io *h, bool readable, bool writable, bool broken) {
     (void)h; (void)readable; (void)writable; (void)broken;
 #ifndef TV_KQUEUE
@@ -12419,7 +12423,8 @@ static void tv_sk_ready(tv_io *h, bool readable, bool writable, bool broken) {
     ssize_t rd = read(tv_sk_efd, &v, sizeof v);
     (void)rd;
 #endif
-    tv_io_quiet = true;
+    /* (bodies a thread received are the program's work; spares opened, housekeeping) */
+    if (!tv_bk_finish_all()) tv_io_quiet = true;
     pthread_mutex_lock(&tv_sk_mu);
     tv_fc *done = tv_sk_dialed;
     tv_sk_dialed = NULL;
@@ -12667,9 +12672,197 @@ static void tv_fr_complete(tv_fr *r) {
     tv_fr_settle(r, 0);
 }
 
+/* ---- big bodies, received on threads of their own
+
+   The rest of a big body read whole, its length known (`(await fetch(url)).text()` of
+   megabytes), is received on a thread of its own, straight into the buffer it becomes: several
+   downloads copy out of the kernel at once (on Linux the copy is the whole cost), and the loop
+   goes on meanwhile. The job holds the connection and the buffer while it runs: the request has
+   neither (an abort only shuts the socket, ending the read sooner) and gets them back when
+   it's done (tv_bk_finish, on the loop). Plain HTTP: a TLS connection's state stays on the
+   loop. On Linux: 8 downloads of 8 MB at once, 0.7k/s to 1.5k/s (Bun 1.1k); macOS's loopback
+   copies cheaply enough that the hand-off costs more than it saves (one download, 92 ms per
+   100 to 130). */
+#define TV_BK_MIN ((size_t)1 << 20)
+#define TV_BK_THREADS 8
+typedef struct tv_bk {
+    tv_int id;            /* the request's; 0 once it was aborted (or freed) meanwhile */
+    tv_fc *c;
+    int fd;
+    tv_sb buf;            /* the request's sink, moved out of it */
+    bool raw;             /* that sink was r->raw (an encoded body), not r->rbody */
+    size_t want, got;     /* bytes to receive, received (fewer: the peer closed, or err) */
+    int err;
+    bool check, bad;      /* checked as UTF-8 as it arrives (see tv_fr_check_utf8): from pos */
+    size_t pos;
+    struct tv_bk *next;
+} tv_bk;
+static pthread_mutex_t tv_bk_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t tv_bk_cv = PTHREAD_COND_INITIALIZER;
+static tv_bk *tv_bk_jobs, *tv_bk_done;
+static int tv_bk_threads, tv_bk_idle;
+
+static void *tv_bk_run(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&tv_bk_mu);
+    for (;;) {
+        while (!tv_bk_jobs) {
+            tv_bk_idle++;
+            pthread_cond_wait(&tv_bk_cv, &tv_bk_mu);
+            tv_bk_idle--;
+        }
+        tv_bk *j = tv_bk_jobs;
+        tv_bk_jobs = j->next;
+        pthread_mutex_unlock(&tv_bk_mu);
+        /* (blocking for the job, the kernel filling the buffer in one call; non-blocking again
+         * for the loop, after) */
+        char *d = j->buf.data + j->buf.len;
+        int fl = fcntl(j->fd, F_GETFL);
+        fcntl(j->fd, F_SETFL, fl & ~O_NONBLOCK);
+        while (j->got < j->want) {
+            /* (a piece at a time, checked as UTF-8 while it's still in cache) */
+            size_t ask = j->want - j->got < ((size_t)256 << 10) ? j->want - j->got : (size_t)256 << 10;
+            ssize_t n = recv(j->fd, d + j->got, ask, MSG_WAITALL);
+            if (n > 0) {
+                j->got += (size_t)n;
+                if (j->check && !j->bad) j->bad = !tv_utf8_scan((const uint8_t *)j->buf.data, j->buf.len + j->got, &j->pos);
+                continue;
+            }
+            if (n == 0) break;
+            if (errno == EINTR) continue;
+            j->err = errno;
+            break;
+        }
+        fcntl(j->fd, F_SETFL, fl);
+        pthread_mutex_lock(&tv_bk_mu);
+        bool poke = !tv_bk_done;
+        j->next = tv_bk_done;
+        tv_bk_done = j;
+        pthread_mutex_unlock(&tv_bk_mu);
+        if (poke) tv_sk_wake_loop();
+        pthread_mutex_lock(&tv_bk_mu);
+    }
+    return NULL;
+}
+
+/* Hands the rest of r's body (c's to receive, room for all of it in its sink) to a thread:
+   false if it can't start one (the loop receives it, as before). */
+static bool tv_bk_start(tv_fr *r, tv_fc *c) {
+    if (!tv_sk_start()) return false;
+    pthread_mutex_lock(&tv_bk_mu);
+    if (tv_bk_idle == 0 && tv_bk_threads < TV_BK_THREADS) {
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setstacksize(&attr, 64 * 1024 > PTHREAD_STACK_MIN ? 64 * 1024 : PTHREAD_STACK_MIN);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        pthread_t t;
+        bool ok = pthread_create(&t, &attr, tv_bk_run, NULL) == 0;
+        pthread_attr_destroy(&attr);
+        if (ok) tv_bk_threads++;
+        else if (tv_bk_threads == 0) {
+            pthread_mutex_unlock(&tv_bk_mu);
+            return false;
+        }
+    }
+    tv_bk *j = tv_alloc(sizeof *j);
+    memset(j, 0, sizeof *j);
+    j->id = r->id;
+    j->c = c;
+    j->fd = c->fd;
+    j->raw = tv_fr_decoding(r);
+    j->check = !j->raw && !r->enc && !r->utf8_bad;
+    j->pos = r->utf8_pos;
+    tv_sb *sink = tv_fr_sink(r);
+    j->buf = *sink;
+    sink->data = NULL;
+    sink->len = sink->cap = 0;
+    j->want = (size_t)r->remaining;
+    r->bulk = j;
+    r->c = NULL;
+    c->r = NULL;
+    /* (out of the loop's queue meanwhile: epoll reports a hang-up even with no interest) */
+    c->bulk = true;
+#ifdef TV_KQUEUE
+    tv_fc_interest(c, false, false);
+#else
+    if (c->registered) epoll_ctl(tv_loop_queue(), EPOLL_CTL_DEL, c->fd, NULL);
+    c->registered = c->reading = c->writing = false;
+#endif
+    /* (the loop waits for it, even past an abort: it hands back the connection and buffer) */
+    tv_io_refs++;
+    j->next = tv_bk_jobs;
+    tv_bk_jobs = j;
+    pthread_cond_signal(&tv_bk_cv);
+    pthread_mutex_unlock(&tv_bk_mu);
+    return true;
+}
+
+/* An abort while a thread receives r's body: the socket is shut so its read ends; the job finds
+   the request gone when it's done. */
+static void tv_bk_abandon(tv_fr *r) {
+    if (!r->bulk) return;
+    r->bulk->id = 0;
+    shutdown(r->bulk->fd, SHUT_RDWR);
+    r->bulk = NULL;
+}
+
+static tv_fr *tv_fr_get(tv_int id);
+
+/* (on the loop) A thread is done with its body: back into the request, which completes (or
+   fails, cut short), as if the loop had received it. */
+static void tv_bk_finish(tv_bk *j) {
+    tv_io_refs--;
+    tv_fr *r = j->id ? tv_fr_get(j->id) : NULL;
+    tv_fc *c = j->c;
+    c->bulk = false;
+    if (!r || r->result != 1 || r->bulk != j) {
+        tv_sb_free(&j->buf);
+        tv_fc_close(c);
+        tv_free(j);
+        return;
+    }
+    r->bulk = NULL;
+    tv_sb *sink = j->raw ? &r->raw : &r->rbody;
+    *sink = j->buf;
+    sink->len += j->got;
+    r->remaining -= (int64_t)j->got;
+    if (j->got) r->got_any = true;
+    if (j->check) {
+        r->utf8_bad = j->bad;
+        r->utf8_pos = j->pos;
+    }
+    bool complete = j->got == j->want;
+    tv_free(j);
+    if (!tv_fr_decoding(r)) tv_fr_check_utf8(r);
+    if (!complete) {
+        tv_fc_close(c);
+        tv_fr_fail(r, "ECONNRESET", "The socket connection was closed unexpectedly. %s", TV_FETCH_VERBOSE);
+        return;
+    }
+    r->state = TV_FR_DONE;
+    tv_fc_release(c, r->keep);
+    tv_fr_complete(r);
+}
+
+/* (false if there were none) */
+static bool tv_bk_finish_all(void) {
+    if (!tv_bk_threads) return false;
+    pthread_mutex_lock(&tv_bk_mu);
+    tv_bk *done = tv_bk_done;
+    tv_bk_done = NULL;
+    pthread_mutex_unlock(&tv_bk_mu);
+    if (!done) return false;
+    while (done) {
+        tv_bk *j = done;
+        done = j->next;
+        tv_bk_finish(j);
+    }
+    return true;
+}
+
 static void tv_fc_ready(tv_io *h, bool readable, bool writable, bool broken) {
     tv_fc *c = (tv_fc *)h;
-    if (c->dead) return;
+    if (c->dead || c->bulk) return;
     tv_fr *r = c->r;
     if (!r) {
         tv_io_quiet = true;
@@ -12768,6 +12961,10 @@ static void tv_fc_ready(tv_io *h, bool readable, bool writable, bool broken) {
                 bool all = r->whole && rest <= ((size_t)256 << 20);
                 tv_sb_grow(sink, sink->len + (all ? rest : want));
             }
+#ifdef __linux__
+            /* (a big rest, room for all of it: received on a thread, see tv_bk_start) */
+            if (r->whole && !c->tls && (size_t)r->remaining >= TV_BK_MIN && sink->cap - sink->len >= (size_t)r->remaining && tv_bk_start(r, c)) return;
+#endif
             long n = tv_fc_recv(c, sink->data + sink->len, want);
             if (n > 0) {
                 r->got_any = true;
@@ -12866,6 +13063,11 @@ static void tv_fetch_after_fork(void) {
         tv_sk_efd = -1;
 #endif
     }
+    /* (the parent's body threads aren't the child's; nor are their jobs) */
+    pthread_mutex_init(&tv_bk_mu, NULL);
+    pthread_cond_init(&tv_bk_cv, NULL);
+    tv_bk_threads = tv_bk_idle = 0;
+    tv_bk_jobs = tv_bk_done = NULL;
     pthread_mutex_init(&tv_dns_mu, NULL);
     pthread_cond_init(&tv_dns_cv, NULL);
     tv_dns_threads = tv_dns_idle = 0;
@@ -13117,6 +13319,7 @@ tv_str tv_native_fetchErrorMessage(tv_int id) {
 void tv_native_fetchAbort(tv_int id) {
     tv_fr *r = tv_fr_get(id);
     if (!r || r->result != 1) return;
+    tv_bk_abandon(r);
     if (r->c) {
         tv_fc *c = r->c;
         r->c = NULL;
