@@ -581,14 +581,37 @@ void tv_native_netBind(tv_int id, tv_fn events, tv_str host, tv_str unix_path) {
     tv_ns_settle(s);
 }
 
+/* A write: sent at once, from the program's own bytes, when it's 512 bytes or more and nothing
+ * is waiting to go before it (what the kernel doesn't take is kept, as below); otherwise kept
+ * in the socket's buffer, which goes out before the loop next waits, one send for all of a
+ * tick's writes. (Sending a big write at once saves copying it: a 4 KB echo, 1.73 -> 1.64 us of
+ * CPU a message on Linux. Small ones are worth gathering.) */
+static void tv_ns_write(tv_ns *s, const char *p, size_t n) {
+    if (n >= 512 && s->state == TV_NS_OPEN && !s->tls && s->out_off == s->out_len && !s->blocked) {
+        ssize_t w;
+        do {
+#ifdef MSG_NOSIGNAL
+            w = send(s->fd, p, n, MSG_NOSIGNAL);
+#else
+            w = send(s->fd, p, n, 0);
+#endif
+        } while (w < 0 && errno == EINTR);
+        if (w == (ssize_t)n) return;
+        /* (an error is found again by the flush, which closes the socket after the handler, not
+         * inside its write) */
+        size_t sent = w > 0 ? (size_t)w : 0;
+        p += sent;
+        n -= sent;
+    }
+    tv_ns_append(s, p, n);
+    if (s->state == TV_NS_OPEN) tv_ns_mark(s);
+}
+
 tv_int tv_native_netWrite(tv_int id, tv_arr bytes) {
     tv_ns *s = tv_ns_get(id);
     if (!s || s->state == TV_NS_CLOSED || s->ending) return -1;
     size_t n = (size_t)bytes.p->len;
-    if (n) {
-        tv_ns_append(s, tv_arr_data(bytes), n);
-        if (s->state == TV_NS_OPEN) tv_ns_mark(s);
-    }
+    if (n) tv_ns_write(s, (const char *)tv_arr_data(bytes), n);
     return (tv_int)n;
 }
 
@@ -596,10 +619,7 @@ tv_int tv_native_netWriteText(tv_int id, tv_str text) {
     tv_ns *s = tv_ns_get(id);
     if (!s || s->state == TV_NS_CLOSED || s->ending) return -1;
     size_t n = (size_t)text.p->len;
-    if (n) {
-        tv_ns_append(s, text.p->data, n);
-        if (s->state == TV_NS_OPEN) tv_ns_mark(s);
-    }
+    if (n) tv_ns_write(s, text.p->data, n);
     return (tv_int)n;
 }
 
