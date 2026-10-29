@@ -11146,6 +11146,15 @@ static void tv_dns_queue(tv_dns *d) {
 static bool tv_utf8_scan(const uint8_t *p, size_t n, size_t *pos) {
     size_t i = *pos;
     while (i < n) {
+        /* (ASCII 64 bytes at a time, one test for all of them: a body of text is mostly that) */
+        while (n - i >= 64) {
+            uint64_t w[8], acc = 0;
+            memcpy(w, p + i, 64);
+            for (int k = 0; k < 8; k++) acc |= w[k];
+            if (acc & 0x8080808080808080ull) break;
+            i += 64;
+        }
+        if (i == n) break;
         if (n - i >= 16) {
             uint64_t a, b;
             memcpy(&a, p + i, 8);
