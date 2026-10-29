@@ -50,4 +50,26 @@ async function main() {
   for (const w of waiters) {
     await w
   }
+
+  // `await Promise.resolve(x)` takes the one tick `await x` does, next to a then-chain.
+  const ticks: string[] = []
+  const viaResolve = (async () => {
+    for (let i = 0; i < 3; i++) {
+      const v = await Promise.resolve(i)
+      ticks.push("r" + String(v))
+    }
+    const s = await Promise.resolve("s")
+    await Promise.resolve()
+    ticks.push(s)
+  })()
+  const viaValue = (async () => {
+    for (let i = 0; i < 3; i++) {
+      const v = await i
+      ticks.push("v" + String(v))
+    }
+  })()
+  Promise.resolve(0).then(() => ticks.push("p1")).then(() => ticks.push("p2"))
+  await viaResolve
+  await viaValue
+  console.log(ticks.join(" "))
 }

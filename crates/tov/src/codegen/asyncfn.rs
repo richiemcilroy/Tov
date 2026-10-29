@@ -289,6 +289,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         {
             return self.await_embedded(e, x, n);
         }
+        if let Some(v) = self.await_resolved(x, n.clone()) {
+            return self.coerce(v, ty);
+        }
         let v = self.expr(x);
         let v = self.own(v);
         if v.ty == JS {
@@ -316,6 +319,44 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.line(format!("if (!tv_await_now({p})) {{ F->pc = &&aw{n}; tv_await_suspend({p}); TV_SUSPEND; }}"));
         self.line(format!("aw{n}:;"));
         self.take_settled(e, &p, inner, ty)
+    }
+
+    /// `await Promise.resolve(v)` of a number, string or the like: `await v`, the value one tick
+    /// later either way, without making the promise.
+    fn await_resolved(&mut self, x: ExprId, n: String) -> Option<Val> {
+        let m = self.cur_m();
+        let ExprKind::Call { args, .. } = &self.ast(m).expr(x).kind else { return None };
+        let arg = match args.as_slice() {
+            [] => None,
+            [a] if !matches!(self.ast(m).expr(a.expr).kind, ExprKind::Spread(_)) => Some(a.expr),
+            _ => return None,
+        };
+        let Some(Callee::Builtin { ns: Some(ns), name }) = self.facts(m).calls.get(&x).map(|c| c.callee.clone()) else { return None };
+        if self.sym(ns) != "Promise" || self.sym(name) != "resolve" {
+            return None;
+        }
+        let xt = self.ty(x);
+        let pt = self.c.types.without_undefined(xt);
+        let Ty::Promise(value, _) = self.tget(pt) else { return None };
+        let plain = matches!(
+            self.tget(value),
+            Ty::Void | Ty::Undefined | Ty::Null | Ty::Bool | Ty::BoolLit(_) | Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32
+                | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64 | Ty::BigInt | Ty::Decimal | Ty::Str | Ty::StrLit(_)
+        );
+        if !plain {
+            return None;
+        }
+        let v = match arg {
+            Some(a) => {
+                let v = self.expr(a);
+                let v = self.coerce(v, value);
+                self.own(v)
+            }
+            None => Val::plain("0", value),
+        };
+        self.line(format!("if (!tv_async_eager()) {{ F->pc = &&aw{n}; tv_task_yield(); TV_SUSPEND; }}"));
+        self.line(format!("aw{n}:;"));
+        Some(v)
     }
 
     /// The value of a settled promise (a rejection sets `tvg_err`, checked when `e` can throw).
