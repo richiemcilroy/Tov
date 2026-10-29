@@ -5954,11 +5954,13 @@ static size_t tv_mapbuf_bytes(int64_t cap, tv_mlayout L) {
     bytes = tv_size_mul_add((size_t)cap * 2, sizeof(uint32_t), bytes);
     return bytes <= TV_MAPBUF_SMALL ? (bytes + 15) & ~(size_t)15 : bytes;
 }
-/* Big stores on macOS map their entries (after the header) and their index apart, not from
- * malloc: a store the map outgrows goes straight back (its allocator keeps freed large blocks
- * dirty, a k-mer count's every size), and the entries grow in place when they can, only the
- * index built again. */
-#ifdef TV_SB_MAPS
+/* Big stores map their entries (after the header) and their index apart, not from malloc: a
+ * store the map outgrows goes straight back, and the entries grow in place when they can, only
+ * the index built again. macOS's allocator keeps freed large blocks dirty (a k-mer count's every
+ * size); glibc's, once a big block is freed, raises its threshold for mapping blocks to that
+ * size and serves the next ones from its heap, where those outgrown stay counted below the one
+ * in use (k-nucleotide on Linux: 23.6 MB at its peak, mapped 15.7). */
+#if defined(TV_SB_MAPS) || (defined(__linux__) && !defined(TV_ASAN))
 #define TV_MAPBUF_MAPPED(bytes) ((bytes) >= ((size_t)128 << 10))
 #else
 #define TV_MAPBUF_MAPPED(bytes) false
@@ -6016,7 +6018,13 @@ static tv_mapbuf *tv_mapbuf_grow(tv_mapbuf *m, tv_mlayout L, int64_t cap) {
     size_t have = tv_mapbuf_entry_bytes(m->cap, L), want = tv_mapbuf_entry_bytes(cap, L);
     /* (the index first: it's often what lies just after the entries, and never both at once) */
     munmap(m->index, tv_mapbuf_index_bytes(m->cap));
+#ifdef __linux__
+    /* (moved, if it must, by the kernel: its pages, not their bytes) */
+    void *q = mremap(m, have, want, MREMAP_MAYMOVE);
+    tv_mapbuf *n = q == MAP_FAILED ? NULL : (tv_mapbuf *)q;
+#else
     tv_mapbuf *n = (tv_mapbuf *)(void *)tv_sb_remap((char *)m, have, want);
+#endif
     if (!n) {
         n = (tv_mapbuf *)tv_map_pages(want);
         memcpy(n, m, sizeof(tv_mapbuf) + (size_t)m->used * L.stride);
