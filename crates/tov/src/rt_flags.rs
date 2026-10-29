@@ -12,6 +12,10 @@ pub fn base_flags(opt: &str, unchecked: bool, symbols: bool, sanitize: bool, sys
     // No FMA contraction: `a * b + c` rounds twice, exactly as in JavaScript (and it's faster on
     // latency-bound loops, where a fused multiply-add lengthens the dependency chain).
     let mut flags: Vec<String> = vec![opt.into(), "-std=gnu11".into(), "-w".into(), "-ffp-contract=off".into()];
+    // Nothing reads errno after Math.sqrt: without the flag a square root is the instruction and
+    // a branch to libm's for a negative operand (to set errno), which also keeps it out of
+    // vectorized loops.
+    flags.push("-fno-math-errno".into());
     // Tov code is bounds-checked, so C's stack canaries and fortified memcpy only add checks
     // (and imports: each costs about 50 bytes of binary).
     flags.extend(["-fno-stack-protector", "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=0"].map(String::from));
