@@ -666,8 +666,15 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         }
     } else if !cfg!(windows) {
         cmd.arg("-Wl,--gc-sections");
+        // (no symbol table: names only serve debuggers and profilers, `-g` keeps them; it's ~5 MB
+        // of a program with the JavaScript engine, written as it's linked and again as it's installed)
         if !opts.symbols {
-            cmd.arg("-Wl,-x");
+            cmd.arg("-Wl,-s");
+        }
+        // (with the engine, lld's merging of identical string tails: ~14 ms of the link, for 1% of
+        // the binary)
+        if jsc_own && lld {
+            cmd.arg("-Wl,-O0");
         }
     }
     let linked = run_cc(cmd, &ld, &c_path);
@@ -1050,7 +1057,7 @@ fn sign_for_jit(binary: &Path, c_dir: &Path) -> Result<(), BuildError> {
 /// macOS: the main thread's stack size (the most arm64 allows).
 const LINK_STACK: &str = "-Wl,-stack_size,0x20000000";
 /// Everything that changes how programs are linked, for the binary cache key.
-const LINK_FLAGS: &str = "dead-strip; dead-strip-dylibs; exported: _main; -x unless -g; sanitizers link without -stack_size; -Wl,-stack_size,0x20000000; Linux: --as-needed after the runtime, lld when installed";
+const LINK_FLAGS: &str = "dead-strip; dead-strip-dylibs; exported: _main; -x unless -g; sanitizers link without -stack_size; -Wl,-stack_size,0x20000000; Linux: --as-needed after the runtime, lld when installed, -s unless -g, -O0 with the engine";
 
 /// The precompiled fixed prefix (`pre-<key>.h`, with its `.pch`/`.gch` beside it) to pass as
 /// `-include`, built on first use; `None` if the compiler can't precompile it (then programs
