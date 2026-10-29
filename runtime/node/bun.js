@@ -425,18 +425,49 @@ async function write(destination, input) {
 // ---------------------------------------------------------------- spawn
 
 // Bun's FileSink over a Node.js Writable
+// (as Bun's FileSink: flush() and end() return a promise while writes are pending, settled when
+// they're written (end(): and the file closed), so a writer awaiting them holds a chunk or two,
+// not everything it was handed faster than the disk took it)
 function fileSink(writable) {
+  let failed = null;
+  writable.on('error', (e) => { failed = e; });
+  // settles when what's been written so far is on its way to the file (writes are in order)
+  const written = () => new Promise((resolve, reject) => {
+    if (failed) return reject(failed);
+    writable.write(Buffer.alloc(0), (e) => (e ? reject(e) : resolve()));
+  });
+  let pending = 0;
   return {
     write(chunk) {
       const b = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : ArrayBuffer.isView(chunk) ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength) : Buffer.from(chunk);
       writable.write(b);
+      pending += b.byteLength;
       return b.byteLength;
     },
-    flush() { return 0; },
+    flush() {
+      if (failed) return Promise.reject(failed);
+      if (writable.writableLength === 0) {
+        const n = pending;
+        pending = 0;
+        return n;
+      }
+      const n = pending;
+      pending = 0;
+      return written().then(() => n);
+    },
     end(error) {
-      if (error) writable.destroy(error);
-      else writable.end();
-      return 0;
+      if (error) {
+        writable.destroy(error);
+        return 0;
+      }
+      const n = pending;
+      pending = 0;
+      return new Promise((resolve, reject) => {
+        if (failed) return reject(failed);
+        writable.once('error', reject);
+        writable.once('close', () => resolve(n));
+        writable.end();
+      });
     },
     start() {},
     ref() {},
