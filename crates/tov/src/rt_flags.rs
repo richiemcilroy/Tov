@@ -82,10 +82,23 @@ pub fn other_compiler() -> String {
     if cfg!(target_vendor = "apple") && Path::new("/usr/bin/cc").is_file() {
         return "/usr/bin/cc".into();
     }
-    for candidate in ["/opt/homebrew/opt/llvm/bin/clang", "/usr/local/opt/llvm/bin/clang", "/usr/lib/llvm-21/bin/clang", "/usr/lib/llvm-20/bin/clang"] {
+    for candidate in ["/opt/homebrew/opt/llvm/bin/clang", "/usr/local/opt/llvm/bin/clang"] {
         if Path::new(candidate).is_file() {
             return candidate.to_string();
         }
+    }
+    // Debian and Ubuntu: the newest of the LLVMs installed side by side (/usr/lib/llvm-<n>), which
+    // `clang` on PATH often isn't (x86-64, nbody: 239 ms from clang 19 against 369 from Ubuntu
+    // 24.04's default clang 18)
+    let newest = std::fs::read_dir("/usr/lib").ok().and_then(|entries| {
+        entries
+            .flatten()
+            .filter_map(|e| e.file_name().to_str()?.strip_prefix("llvm-")?.parse::<u32>().ok())
+            .filter(|n| Path::new(&format!("/usr/lib/llvm-{n}/bin/clang")).is_file())
+            .max()
+    });
+    if let Some(n) = newest {
+        return format!("/usr/lib/llvm-{n}/bin/clang");
     }
     // Any clang before `cc`, which on Linux is usually GCC: Tov's C runs faster from clang
     // (x86-64, Ubuntu's clang 18 against GCC 13: fib 449 ms against 511, nbody 308 against 382)
