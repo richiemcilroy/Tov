@@ -29,6 +29,19 @@
 #define TV_LIKELY(x) (x)
 #define TV_UNLIKELY(x) (x)
 #endif
+/* Code run once or rarely (start-up, traps, the allocator's housekeeping, big builders' pages):
+ * compiled for size, so a small program's code fits fewer pages (loops: 17 KB of it, two 16 KB
+ * pages on macOS, to one). TV_RARE ones are also out of the way of the code calling them. */
+#if defined(__clang__)
+#define TV_SMALL_CODE __attribute__((minsize, noinline))
+#define TV_RARE __attribute__((cold, minsize, noinline))
+#elif defined(__GNUC__)
+#define TV_SMALL_CODE __attribute__((optimize("Os"), noinline))
+#define TV_RARE __attribute__((cold, noinline))
+#else
+#define TV_SMALL_CODE
+#define TV_RARE
+#endif
 
 /* ================================================================== globals */
 
@@ -68,7 +81,7 @@ __attribute__((noinline)) void tv_err_cstr(const char *s) { tv_write_fd(2, s, st
 
 static size_t tv_fmt_i64(char *buf, int64_t v);
 
-static _Noreturn void tv_oom(size_t size) {
+static TV_RARE _Noreturn void tv_oom(size_t size) {
     tv_out_flush();
     char num[24];
     size_t n = tv_fmt_i64(num, (int64_t)size);
@@ -95,7 +108,7 @@ static void *tv_zero_pages(size_t size) {
     return p;
 }
 
-_Noreturn void tv_trap(const char *msg, const char *loc) {
+TV_RARE _Noreturn void tv_trap(const char *msg, const char *loc) {
     if (tv_test_jmp) {
         tv_test_msg.len = 0;
         tv_sb_push_cstr(&tv_test_msg, "trap: ");
@@ -176,7 +189,7 @@ static os_unfair_lock tv_sb_cache_lock = OS_UNFAIR_LOCK_INIT;
 
 /* A cached mapping of `size` to `most` bytes, cut down to `size`, or NULL. (The smallest that
  * fits; what's past `size` goes back.) */
-static char *tv_sb_cache_take(size_t size, size_t most) {
+static TV_SMALL_CODE char *tv_sb_cache_take(size_t size, size_t most) {
     if (!tv_sb_cache_bytes) return NULL;
     char *p = NULL;
     size_t have = 0;
@@ -209,7 +222,7 @@ static char *tv_sb_map(size_t cap) {
 /* Unmaps `size` bytes at p (page-rounded, from tv_sb_map), or keeps them for reuse. A full
  * cache makes room by unmapping its oldest: the sizes just freed are the ones about to be
  * asked for again, and one that no longer fits anything would otherwise hold its place. */
-static void tv_sb_unmap(char *p, size_t size) {
+static TV_SMALL_CODE void tv_sb_unmap(char *p, size_t size) {
     char *drop[TV_SB_CACHE_SLOTS];
     size_t drop_size[TV_SB_CACHE_SLOTS];
     int ndrop = 0;
@@ -698,19 +711,22 @@ static size_t tv_carved;
 /* Spans: runs of free blocks, whatever their class, any class can carve again. Each class's free
  * list only feeds its own size, so a program done with a million 24-byte strings that goes on to
  * make 32-byte ones would otherwise touch fresh memory for all of them (k-nucleotide: its 12-mer
- * keys, then its 18-mers). Before a chunk takes fresh memory, once enough has been taken since
- * the last look, the free lists' blocks in the arena are marked on a bitmap (a bit per 8 bytes);
- * every run of at least TV_SPAN_MIN free bytes leaves its lists and becomes a span. The next
- * look waits for fresh memory in proportion to the blocks it walked, so a program whose free
- * blocks lie between live ones pays for them once. */
+ * keys, then its 18-mers). Before a chunk takes fresh memory, once 4 MB has been taken (and
+ * enough since the last look), the free lists' blocks in the arena are marked on a bitmap (a bit
+ * per 8 bytes); every run of at least TV_SPAN_MIN free bytes leaves its lists and becomes a span.
+ * The next look waits for fresh memory in proportion to the blocks it walked, so a program whose
+ * free blocks lie between live ones pays for them once. */
 typedef struct tv_span { struct tv_span *next; size_t size; } tv_span;
 enum { TV_SPAN_MIN = 4096 };
 static tv_span *tv_spans;
 static char **tv_arenas;
 static size_t tv_narenas;
-static size_t tv_fresh, tv_spans_at = (size_t)4 << 20;
+/* (zero to start, as the runtime's other variables: one that isn't puts a page of initialized data
+ * in every program, 16 KB of binary and of memory on macOS) */
+static size_t tv_fresh, tv_spans_at;
+#define TV_SPANS_FIRST ((size_t)4 << 20)
 
-static void tv_arena_add(char *a) {
+static TV_RARE void tv_arena_add(char *a) {
     tv_arenas = tv_realloc(tv_arenas, (tv_narenas + 1) * sizeof *tv_arenas);
     tv_arenas[tv_narenas++] = a;
 }
@@ -738,7 +754,7 @@ static size_t tv_bits_next(const uint64_t *w, size_t i, size_t n, bool set) {
     return n;
 }
 
-static bool tv_spans_make(void) {
+static TV_RARE bool tv_spans_make(void) {
     enum { UNITS = TV_ARENA_BLOCK / 8 };
     size_t walked = 0, freeb = 0, hint = 0;
     for (size_t c = 1; c < TV_SMALL_CLASSES; c++)
@@ -791,7 +807,7 @@ static bool tv_spans_make(void) {
 }
 
 /* blocks of sz for k, up to `bytes` of them, from the first span with room for one */
-static void *tv_span_take(tv_class_space *k, size_t sz, size_t bytes) {
+static TV_SMALL_CODE void *tv_span_take(tv_class_space *k, size_t sz, size_t bytes) {
     for (tv_span **pp = &tv_spans; *pp; pp = &(*pp)->next) {
         tv_span *s = *pp;
         char *end = (char *)s + s->size;
@@ -833,7 +849,7 @@ static void *tv_carve(tv_class_space *k, size_t sz) {
         p = tv_alloc(bytes);
         tv_carved += bytes;
     } else {
-        if (tv_fresh >= tv_spans_at && tv_spans_make() && (p = tv_span_take(k, sz, bytes)) != NULL) return p;
+        if (tv_fresh >= tv_spans_at && tv_fresh >= TV_SPANS_FIRST && tv_spans_make() && (p = tv_span_take(k, sz, bytes)) != NULL) return p;
         if ((size_t)(tv_bump_end - tv_bump) < bytes) {
             tv_bump = tv_alloc(TV_ARENA_BLOCK);
             tv_bump_end = tv_bump + TV_ARENA_BLOCK;
@@ -7540,7 +7556,7 @@ tv_str tv_native_cwd(void) {
     return tv_str_from(buf, strlen(buf));
 }
 
-tv_arr tv_process_argv(void) {
+TV_RARE tv_arr tv_process_argv(void) {
     tv_arr out = tv_arr_with_capacity(&tv_type_str, tv_argc + 1);
     /* Node: [node binary, script, args...]; a Tov program is both, so argv[0] appears twice. */
     for (int i = -1; i < tv_argc; i++) {
