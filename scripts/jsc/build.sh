@@ -4,7 +4,7 @@
 #   ~/.cache/tov/jsc/<os>-<arch>/{lib/libtovjsc.a, include/JavaScriptCore/*.h, VERSION, order.txt (Linux)}
 # which `tov build` links programs that import npm packages with (TOV_JSC=system uses the
 # system's instead). On macOS it builds here; `scripts/jsc/build.sh linux` builds Linux's in a
-# container (scripts/jsc/Dockerfile.linux).
+# container (scripts/jsc/Dockerfile.linux), and `linux-release` the one a release ships.
 set -eu
 TAG=webkitgtk-2.54.1
 here=$(cd "$(dirname "$0")" && pwd)
@@ -15,6 +15,12 @@ mkdir -p "$cache"
 if [ "${1:-}" = linux ]; then
     docker build -q -t tov-jsc-linux -f "$here/Dockerfile.linux" "$here" > /dev/null
     exec docker run --rm -v "$root:/tov" -v "$cache:/jsc" -e TOV_JSC_CACHE=/jsc tov-jsc-linux sh /tov/scripts/jsc/build.sh
+fi
+# (a release's: built on an older base, ICU bundled, in <cache>/release; see Dockerfile.linux-release)
+if [ "${1:-}" = linux-release ]; then
+    mkdir -p "$cache/release"
+    docker build -q -t tov-jsc-linux-release -f "$here/Dockerfile.linux-release" "$here" > /dev/null
+    exec docker run --rm -v "$root:/tov" -v "$cache/release:/jsc" -e TOV_JSC_CACHE=/jsc tov-jsc-linux-release sh /tov/scripts/jsc/build.sh
 fi
 
 src="$cache/src-$TAG"
@@ -144,6 +150,13 @@ else
         echo END
     } | ar -M
     headers="$build/JavaScriptCore/Headers/JavaScriptCore"
+    # (a release's engine carries the ICU and C++ library it was built against, which `tov
+    # build` links in place of the system's)
+    if [ -n "${TOV_JSC_BUNDLE_ICU:-}" ]; then
+        for a in libicui18n.a libicuuc.a libicudata.a libstdc++.a libatomic.a; do
+            cp "$("${CXX:-c++}" -print-file-name="$a")" "$out.tmp/lib/$a"
+        done
+    fi
 fi
 cp "$headers"/*.h "$out.tmp/include/JavaScriptCore/"
 echo "$TAG $version" > "$out.tmp/VERSION"

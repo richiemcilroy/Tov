@@ -1,0 +1,12 @@
+# Builds Tov's JavaScriptCore for a release (scripts/jsc/build.sh linux-release): on an older base
+# (Ubuntu 22.04, glibc 2.35), so programs link against it on the systems people run, with ICU's
+# and the C++ library's static libraries put beside the engine (their versions are then the
+# engine's, not the system's; the engine needs GCC 12's C++ library, newer than 22.04's default).
+FROM ubuntu:22.04
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg git cmake ninja-build \
+    ruby perl python3 libicu-dev g++-12 && \
+    curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-19 main" > /etc/apt/sources.list.d/llvm.list && \
+    apt-get update && apt-get install -y --no-install-recommends clang-19 lld-19 && apt-get clean && \
+    ln -s /usr/bin/clang-19 /usr/local/bin/clang && ln -s /usr/bin/clang++-19 /usr/local/bin/clang++
+ENV CC=clang CXX=clang++ TOV_JSC_BUNDLE_ICU=1

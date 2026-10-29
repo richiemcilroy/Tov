@@ -852,7 +852,13 @@ fn jsc_flags() -> Result<JscFlags, BuildError> {
             // there (Debian's libicu-dev has them): a program then binds no symbols of theirs as it
             // starts (the dynamic loader was a sixth of an npm program's start); and the program
             // isn't position independent (`-no-pie`: no relocations to apply at start either)
-            if static_icu() {
+            // (a release's engine brings the ICU and C++ library it was built against:
+            // scripts/jsc/build.sh linux-release)
+            let bundled = ["libicui18n.a", "libicuuc.a", "libicudata.a", "libstdc++.a", "libatomic.a"].map(|a| dir.join("lib").join(a));
+            if bundled.iter().all(|a| a.is_file()) {
+                libs.extend(bundled.iter().map(|a| a.to_string_lossy().into_owned()));
+                libs.extend(["-ldl", "-lpthread", "-no-pie"].map(String::from));
+            } else if static_icu() {
                 libs.extend(["-Wl,-Bstatic", "-licui18n", "-licuuc", "-licudata", "-lstdc++", "-latomic", "-Wl,-Bdynamic", "-ldl", "-no-pie"].map(String::from));
             } else {
                 libs.extend(["-licui18n", "-licuuc", "-licudata", "-lstdc++", "-ldl", "-latomic"].map(String::from));
