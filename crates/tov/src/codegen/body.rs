@@ -4845,14 +4845,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                 for v in vals.iter().filter(|v| matches!(self.tget(v.ty), Ty::Str)) {
                     size.push_str(&format!(" + (size_t)tv_str_byte_len({})", v.code));
                 }
+                let stack = self.stack_builder(&sbv);
                 if !vals.is_empty() {
-                    self.line(format!("tv_sb_grow(&{sbv}, {size});"));
+                    if stack.is_some() {
+                        self.line(format!("if ({sbv}.cap < (size_t)({size})) tv_sb_grow(&{sbv}, {size});"));
+                    } else {
+                        self.line(format!("tv_sb_grow(&{sbv}, {size});"));
+                    }
                 }
-                self.open("{");
+                if stack.is_none() {
+                    self.open("{");
+                }
                 self.line(format!("tv_sb *sb = &{sbv};"));
                 self.template_into(parts, &vals);
-                self.close("}");
-                self.tmp(STR, &format!("tv_str_from_sb(&{sbv})"), true)
+                self.end_builder(&sbv, stack)
             }
             ExprKind::Ident(_) => self.ident(e, ty),
             ExprKind::Paren(x) => self.expr(*x),
@@ -6674,6 +6680,39 @@ impl<'c, 'a> Gen<'c, 'a> {
         Some(Val::plain(format!("(__builtin_expect({}, 1) ? (double)({exact}) / {c}.0 : ({{ __asm__ volatile(\"\"); {floats}; }}))", small.join(" && ")), F64))
     }
 
+    /// Declares the builder `sbv` for a string made in one go: on the stack (TV_SB_STACK) in its
+    /// own C block, which `end_builder` closes, so a short string costs one allocation and the
+    /// C compiler reuses the buffer's stack slot for the next one. In an async function or a
+    /// generator, whose locals move into a frame, an ordinary builder (`None`). Returns the
+    /// variable the string is left in.
+    fn stack_builder(&mut self, sbv: &str) -> Option<String> {
+        let framed = self.b().async_fn.is_some() || self.b().gen_elem.is_some();
+        if framed {
+            self.line(format!("tv_sb {sbv} = {{0}};"));
+            return None;
+        }
+        let res = self.fresh("t");
+        self.line(format!("tv_str {res};"));
+        self.open("{");
+        self.line(format!("TV_SB_STACK({sbv});"));
+        Some(res)
+    }
+
+    /// The string `stack_builder`'s builder made (an owned temporary), its block closed.
+    fn end_builder(&mut self, sbv: &str, stack: Option<String>) -> Val {
+        match stack {
+            Some(res) => {
+                self.line(format!("{res} = tv_str_from_sb(&{sbv});"));
+                self.close("}");
+                self.tmp(STR, &res, true)
+            }
+            None => {
+                self.close("}");
+                self.tmp(STR, &format!("tv_str_from_sb(&{sbv})"), true)
+            }
+        }
+    }
+
     pub(crate) fn binary_pub(&mut self, op: BinOp, l: ExprId, r: ExprId, ty: TyId, span: Span) -> Val {
         self.binary(op, l, r, ty, span)
     }
@@ -6945,15 +6984,16 @@ impl<'c, 'a> Gen<'c, 'a> {
                     return self.tmp(STR, &format!("tv_str_concat({}, {})", lv.code, rv.code), true);
                 }
                 let sbv = self.fresh("sb");
-                self.line(format!("tv_sb {sbv} = {{0}};"));
-                self.open("{");
+                let stack = self.stack_builder(&sbv);
+                if stack.is_none() {
+                    self.open("{");
+                }
                 self.line(format!("tv_sb *sb = &{sbv};"));
                 for v in [lv, rv] {
                     let c = self.string_code(v.ty, &v.code);
                     self.line(format!("{c};"));
                 }
-                self.close("}");
-                self.tmp(STR, &format!("tv_str_from_sb(&{sbv})"), true)
+                self.end_builder(&sbv, stack)
             }
             Add | Sub if ty == BIGINT && (self.big_mul_parts(r).is_some() || (op == Add && self.big_mul_parts(l).is_some())) => {
                 // `z + x * y`, `x * y + z`, `z - x * y`: one pass (see tv_big_muladd)

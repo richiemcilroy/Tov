@@ -1858,8 +1858,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         match self.tget(t) {
             Ty::Str => format!("tv_sb_push_str(sb, {place})"),
             Ty::StrLit(s) => {
+                // (its length known here: no strlen, and a NUL inside it is kept)
                 let text = self.sym(s).to_string();
-                format!("tv_sb_push_cstr(sb, {})", c_string(text.as_bytes()))
+                format!("tv_sb_push(sb, {}, {})", c_string(text.as_bytes()), text.len())
             }
             Ty::Int if self.bodies.last().is_some_and(|b| self.js_ints(b.m)) => format!("tv_sb_push_jint(sb, {place})"),
             Ty::Int => format!("tv_sb_push_int(sb, {place})"),

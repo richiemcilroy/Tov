@@ -211,6 +211,20 @@ typedef struct tv_strbuf {
     char data[];       /* NUL-terminated */
 } tv_strbuf;
 
+/* A builder whose first bytes go in a buffer on the caller's stack (TV_SB_STACK), marked by its
+ * header's count: a short string built in it is copied out once, with no block of the builder's
+ * own; growing past it copies to one. (Only where the builder ends in the same C block.) */
+#define TV_SB_STACK_MARK ((int32_t)0x5BB5B55B)
+#define TV_SB_STACK_BYTES 64
+#define TV_SB_STACK(name) _Alignas(8) char name##_buf[sizeof(tv_strbuf) + TV_SB_STACK_BYTES]; tv_sb name = tv_sb_on_stack(name##_buf, sizeof name##_buf)
+static inline tv_sb tv_sb_on_stack(char *buf, size_t size) {
+    ((tv_strbuf *)(void *)buf)->rc = TV_SB_STACK_MARK;
+    return (tv_sb){buf + sizeof(tv_strbuf), 0, size - sizeof(tv_strbuf) - 1};
+}
+static inline bool tv_sb_is_stack(const tv_sb *sb) {
+    return sb->data != NULL && ((const tv_strbuf *)(const void *)(sb->data - sizeof(tv_strbuf)))->rc == TV_SB_STACK_MARK;
+}
+
 #define TV_STR_COUNT 0x1FFFFFFF
 #define TV_STR_ASCII 0x20000000   /* every byte is ASCII: UTF-16 indexes are byte indexes */
 #define TV_STR_WIDE  0x40000000   /* some byte isn't */

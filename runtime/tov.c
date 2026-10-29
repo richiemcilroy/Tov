@@ -283,7 +283,9 @@ void tv_sb_grow(tv_sb *sb, size_t need) {
     size_t cap = sb->cap ? sb->cap * 2 : 32;
     if (cap < need) cap = need;
     if (cap > SIZE_MAX - TV_STR_HDR - 1) tv_trap("string too long", NULL);
-    char *old = sb->data ? sb->data - TV_STR_HDR : NULL;
+    /* (a builder on the stack: its bytes are copied to a block of its own, the stack left be) */
+    char *stack = tv_sb_is_stack(sb) ? sb->data : NULL;
+    char *old = sb->data && !stack ? sb->data - TV_STR_HDR : NULL;
     char *base;
     if (TV_SB_SMALL(cap)) {
         size_t c = (TV_STR_HDR + cap + 1 + 7) >> 3;
@@ -317,6 +319,9 @@ void tv_sb_grow(tv_sb *sb, size_t need) {
     } else {
         base = (char *)tv_realloc(old, TV_STR_HDR + cap + 1);
     }
+    if (stack && sb->len) memcpy(base + TV_STR_HDR, stack, sb->len);
+    /* (a block's count isn't the stack mark, whatever was in it: see tv_sb_is_stack) */
+    ((tv_strbuf *)(void *)base)->rc = 0;
     sb->data = base + TV_STR_HDR;
     sb->cap = cap;
 }
@@ -343,7 +348,7 @@ void tv_sb_push_char(tv_sb *sb, char c) {
 }
 
 void tv_sb_free(tv_sb *sb) {
-    if (sb->data) tv_sb_release_buf(sb->data - TV_STR_HDR, sb->cap);
+    if (sb->data && !tv_sb_is_stack(sb)) tv_sb_release_buf(sb->data - TV_STR_HDR, sb->cap);
     sb->data = NULL;
     sb->len = sb->cap = 0;
 }
@@ -805,6 +810,12 @@ static tv_str tv_str_from_ascii(const char *bytes, size_t n) {
 /* A short string of bytes just written (2 to 40 of them): see tv_str_from_ascii. */
 static tv_str tv_str_from_fresh(const char *bytes, size_t n) {
     tv_strbuf *b = tv_strbuf_new(n);
+#if defined(__aarch64__)
+    /* (Arm forwards the bytes' stores to a copy's wider loads: a plain copy, ~10% faster for
+     * `"v" + i` and ~17% for `String(x)` than the gather below) */
+    memcpy(b->data, bytes, n);
+    b->data[n] = 0;
+#else
     /* (gathered a byte at a time, written a word at a time, the NUL and the block's padding
      * included: later word reads of the string, a compare's, forward from those stores) */
     const volatile unsigned char *src = (const volatile unsigned char *)bytes;
@@ -816,11 +827,18 @@ static tv_str tv_str_from_fresh(const char *bytes, size_t n) {
         }
         memcpy(b->data + w * 8, &word, 8);
     }
+#endif
     return (tv_str){b};
 }
 
 tv_str tv_str_from_sb(tv_sb *sb) {
     size_t n = sb->len;
+    if (tv_sb_is_stack(sb)) {
+        tv_str r = n >= 2 && n <= 40 ? tv_str_from_fresh(sb->data, n) : tv_str_from(sb->data, n);
+        sb->data = NULL;
+        sb->len = sb->cap = 0;
+        return r;
+    }
     if (n <= 1) { /* empty or one byte: tv_str_from may return an immortal string */
         tv_str r = tv_str_from(sb->data, n);
         tv_sb_free(sb);
