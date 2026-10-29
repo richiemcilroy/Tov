@@ -4,6 +4,8 @@
 #   tov-jsc-<os>-<arch>.tar.gz    Tov's JavaScript engine, for npm packages (scripts/jsc/build.sh;
 #                                 on Linux the release's, from `build.sh linux-release`)
 # each with a .sha256 beside it. site/public/install.sh downloads them from the GitHub release.
+# On Linux the compiler is built on Ubuntu 22.04 too (a container), so it runs with glibc 2.35:
+# a newer system's glibc versions even the symbols Rust only looks up weakly.
 #
 #   scripts/release/package.sh [engine-dir]
 set -eu
@@ -26,13 +28,23 @@ fi
 out="$root/target/dist"
 mkdir -p "$out"
 cd "$root"
-# (macOS 11 and up, as the engine)
-MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --release --locked -q -p tov
+if [ "$os" = linux ]; then
+    docker run --rm -v "$root:/tov" -w /tov -e CARGO_TARGET_DIR=/tov/target/linux-release ubuntu:22.04 sh -c '
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq > /dev/null && apt-get install -y -qq curl ca-certificates build-essential > /dev/null
+        curl -fsSL https://sh.rustup.rs | sh -s -- -y -q --profile minimal > /dev/null
+        . "$HOME/.cargo/env" && cargo build --release --locked -q -p tov && chown -R '"$(id -u):$(id -g)"' target/linux-release'
+    bin=target/linux-release/release/tov
+else
+    # (macOS 11 and up, as the engine)
+    MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --release --locked -q -p tov
+    bin=target/release/tov
+fi
 
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT INT TERM
 mkdir -p "$stage/tov" "$stage/jsc"
-cp target/release/tov "$stage/tov/tov"
+cp "$bin" "$stage/tov/tov"
 strip "$stage/tov/tov"
 # (macOS: stripping voids the linker's ad-hoc signature, without which arm64 won't run it)
 [ "$os" = darwin ] && codesign -s - -f "$stage/tov/tov" 2> /dev/null
