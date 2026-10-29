@@ -507,3 +507,54 @@ index 9beafcf7..7545b25e 100644
  
  bool shouldAllowMiniMode()
  {
+diff --git a/Source/bmalloc/bmalloc/VMAllocate.h b/Source/bmalloc/bmalloc/VMAllocate.h
+index 036636ce..684d582f 100644
+--- a/Source/bmalloc/bmalloc/VMAllocate.h
++++ b/Source/bmalloc/bmalloc/VMAllocate.h
+@@ -324,10 +324,8 @@ inline void vmDeallocatePhysicalPages(void* p, size_t vmSize)
+ #elif BOS(FREEBSD)
+     SYSCALL(madvise(p, vmSize, MADV_FREE));
+ #else
++    // Tov: no MADV_DONTDUMP (see pas_page_malloc.c): it splits the mapping.
+     SYSCALL(madvise(p, vmSize, MADV_DONTNEED));
+-#if BOS(LINUX)
+-    SYSCALL(madvise(p, vmSize, MADV_DONTDUMP));
+-#endif
+ #endif
+ }
+ 
+@@ -342,9 +340,6 @@ inline void vmAllocatePhysicalPages(void* p, size_t vmSize)
+     // Instead the kernel will commit pages as they are touched.
+ #else
+     SYSCALL(madvise(p, vmSize, MADV_NORMAL));
+-#if BOS(LINUX)
+-    SYSCALL(madvise(p, vmSize, MADV_DODUMP));
+-#endif
+ #endif
+ }
+ #else
+diff --git a/Source/bmalloc/libpas/src/libpas/pas_page_malloc.c b/Source/bmalloc/libpas/src/libpas/pas_page_malloc.c
+index ac0e48a4..a8c5ec53 100644
+--- a/Source/bmalloc/libpas/src/libpas/pas_page_malloc.c
++++ b/Source/bmalloc/libpas/src/libpas/pas_page_malloc.c
+@@ -389,8 +389,11 @@ static void commit_impl(void* ptr, size_t size, bool do_mprotect, bool is_symmet
+     }
+ 
+ #if PAS_OS(LINUX)
++    /* Tov: no MADV_DODUMP (nor MADV_DONTDUMP on decommit): marking a range splits its mapping
++     * from the rest, so a heap that commits and decommits page by page ends up as thousands of
++     * mappings, which every later fault looks through and the kernel takes apart at exit. Core
++     * dumps include decommitted pages, as zeros. */
+     PAS_ASSERT(!is_symmetric);
+-    PAS_SYSCALL(madvise(ptr, size, MADV_DODUMP));
+ #elif PAS_OS(WINDOWS)
+     if (is_symmetric) {
+         /*
+@@ -479,7 +482,6 @@ static void decommit_impl(void* ptr, size_t size,
+ #elif PAS_OS(LINUX)
+     PAS_ASSERT(!is_symmetric);
+     PAS_SYSCALL(madvise(ptr, size, MADV_DONTNEED));
+-    PAS_SYSCALL(madvise(ptr, size, MADV_DONTDUMP));
+ #elif PAS_OS(WINDOWS)
+     if (is_symmetric) {
+         /*
