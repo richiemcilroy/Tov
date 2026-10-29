@@ -12702,6 +12702,7 @@ static pthread_cond_t tv_bk_cv = PTHREAD_COND_INITIALIZER;
 static tv_bk *tv_bk_jobs, *tv_bk_done;
 static int tv_bk_threads, tv_bk_idle;
 
+#ifdef __linux__
 static void *tv_bk_run(void *arg) {
     (void)arg;
     pthread_mutex_lock(&tv_bk_mu);
@@ -12796,6 +12797,7 @@ static bool tv_bk_start(tv_fr *r, tv_fc *c) {
     pthread_mutex_unlock(&tv_bk_mu);
     return true;
 }
+#endif
 
 /* An abort while a thread receives r's body: the socket is shut so its read ends; the job finds
    the request gone when it's done. */
