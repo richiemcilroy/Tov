@@ -396,6 +396,14 @@ static __attribute__((noinline, cold)) tv_int tvg_jround(double d, const char *l
 #define TV_SUB(T, a, b, loc) ({ T tv__r; if (__builtin_expect(__builtin_sub_overflow((a), (b), &tv__r), 0)) tv_trap("integer overflow in -", loc); tv__r; })
 #define TV_MUL(T, a, b, loc) ({ T tv__r; if (__builtin_expect(__builtin_mul_overflow((a), (b), &tv__r), 0)) tv_trap("integer overflow in *", loc); tv__r; })
 #endif
+/* Before a small innermost loop doing checked arithmetic (see Gen::open_loop): its checks are
+ * exits of their own, which LLVM unrolls past only when told to. (TOV_CFLAGS=-DTOV_NO_UNROLL
+ * leaves it out, to compare.) */
+#if defined(__clang__) && !defined(TOV_UNCHECKED) && !defined(TOV_NO_UNROLL)
+#define TV_UNROLL _Pragma("clang loop unroll_count(4)")
+#else
+#define TV_UNROLL
+#endif
 /* `x % d` by a d a loop nest doesn't change (see Gen::hoist_divisors): d's reciprocal, worked out
  * once before the loop (Granlund and Montgomery's round-up method), turns each remainder of
  * x >= 0 by d > 0 into a multiply and shifts instead of a division. */

@@ -1948,10 +1948,38 @@ impl<'c, 'a> Gen<'c, 'a> {
         added
     }
 
+    /// `for (;;) {`, unrolled four times when the loop is small, innermost and does checked integer
+    /// arithmetic (`total += x`, `n * k`) or calls what may (`total = await step(total, i)`):
+    /// each check is a way out of the loop, and LLVM unrolls a loop with more than one only when
+    /// told to (awaited async calls summed in a loop: 15.6 ms to 13.5, Rust's unchecked 14.0).
+    fn open_loop(&mut self, body: StmtId, also: &[ExprId]) {
+        let ast = self.ast(self.cur_m());
+        let facts = self.facts(self.cur_m());
+        let mut all = Vec::new();
+        for &e in also {
+            collect_exprs_expr(ast, e, &mut all);
+        }
+        collect_exprs_stmt(ast, body, &mut all);
+        let int = |e: ExprId| facts.expr_ty.get(e as usize).copied() == Some(INT);
+        let small = all.len() <= 48 && !stmt_has_loop(ast, body) && !all.iter().any(|&e| matches!(ast.expr(e).kind, ExprKind::Arrow(_)));
+        if small
+            && all.iter().any(|&e| match &ast.expr(e).kind {
+                ExprKind::Binary(BinOp::Add | BinOp::Sub | BinOp::Mul, ..) | ExprKind::Assign(AssignOp::Op(BinOp::Add | BinOp::Sub | BinOp::Mul), ..) | ExprKind::Update { .. } => int(e),
+                // (a small function's, once LLVM inlines it)
+                ExprKind::Call { .. } => true,
+                _ => false,
+            })
+        {
+            self.line("TV_UNROLL");
+        }
+        self.open("for (;;) {");
+    }
+
     /// A `for` loop's `for (;;) { ... }` (its init already emitted).
     #[allow(clippy::too_many_arguments)]
     fn for_loop(&mut self, cond: Option<ExprId>, step: Option<ExprId>, body: StmtId, cont: &str, bounds: Option<(u32, u32)>, nowrap: Option<u32>, iteration_binding: Option<u32>) {
-        self.open("for (;;) {");
+        let also: Vec<ExprId> = [cond, step].into_iter().flatten().collect();
+        self.open_loop(body, &also);
         if let Some(c) = cond {
             self.cond_break(c);
         }
@@ -3922,7 +3950,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 let cont = self.fresh("cont");
                 let counter = self.guarded_counter(*c, *body);
-                self.open("for (;;) {");
+                self.open_loop(*body, &[*c]);
                 self.cond_break(*c);
                 if let Some(k) = counter {
                     self.b().nowrap_locals.push(k);
@@ -3941,7 +3969,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             StmtKind::DoWhile(body, c) => {
                 let hoisted = self.hoist_unique(&[*body], &[*c]);
                 let cont = self.fresh("cont");
-                self.open("for (;;) {");
+                self.open_loop(*body, &[*c]);
                 self.loop_body(*body, &cont);
                 self.line(format!("{cont}:;"));
                 self.cond_break(*c);
@@ -10533,6 +10561,18 @@ pub(crate) fn collect_exprs_stmt(ast: &ast::Ast, s: StmtId, out: &mut Vec<ExprId
             }
         }
         _ => {}
+    }
+}
+
+/// A loop statement in `s` (outside closures).
+fn stmt_has_loop(ast: &ast::Ast, s: StmtId) -> bool {
+    match &ast.stmt(s).kind {
+        StmtKind::For { .. } | StmtKind::ForOf { .. } | StmtKind::While(..) | StmtKind::DoWhile(..) => true,
+        StmtKind::If(_, t, e) => stmt_has_loop(ast, *t) || e.is_some_and(|e| stmt_has_loop(ast, e)),
+        StmtKind::Block(xs) => xs.iter().any(|&x| stmt_has_loop(ast, x)),
+        StmtKind::Switch(_, cases) => cases.iter().any(|c| c.body.iter().any(|&x| stmt_has_loop(ast, x))),
+        StmtKind::Try { body, catch, finally } => stmt_has_loop(ast, *body) || catch.as_ref().is_some_and(|c| stmt_has_loop(ast, c.body)) || finally.is_some_and(|f| stmt_has_loop(ast, f)),
+        _ => false,
     }
 }
 
