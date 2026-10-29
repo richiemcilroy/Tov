@@ -385,11 +385,15 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         }
     }
     // Linux: BoringSSL's classes with virtual destructors name C++'s sized operator delete, which
-    // nothing calls (it allocates and frees with functions of its own). Defined here as libstdc++
-    // defines it, a program using TLS doesn't load libstdc++ (~1 MB of its memory) for it. (The
-    // JavaScript engine is C++ through and through: a program with npm packages loads it anyway.)
+    // nothing calls (it allocates and frees with functions of its own), and a bounds-checked
+    // accessor from the C++ headers names `std::__throw_out_of_range_fmt`. Defined here as
+    // libstdc++ defines them (without exceptions, a throw is an abort), a program using TLS
+    // doesn't load libstdc++ (~1.4 MB of its memory) for them: GNU ld keeps a library a
+    // reference names even when the code with it is dropped. (The JavaScript engine is C++
+    // through and through: a program with npm packages loads it anyway.)
     if uses_tls && npm.is_empty() && !cfg!(target_vendor = "apple") && !cfg!(windows) {
         c_src.push_str("void _ZdlPvm(void *p, unsigned long n) { (void)n; free(p); }\n");
+        c_src.push_str("__attribute__((noreturn)) void _ZSt24__throw_out_of_range_fmtPKcz(const char *fmt, ...) { (void)fmt; abort(); }\n");
     }
     let t2 = Instant::now();
     if let Some(p) = &opts.emit_c {
