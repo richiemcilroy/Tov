@@ -105,7 +105,7 @@ rust_minor=$(rustc --version 2>/dev/null | sed -n 's/^rustc 1\.\([0-9]*\).*/\1/p
 if [ -n "$rust_minor" ] && [ "$rust_minor" -lt 95 ]; then
     if command -v rustup > /dev/null 2>&1; then
         say "Updating Rust (Tov needs 1.95 or newer)..."
-        rustup update stable -q > /dev/null
+        rustup -q update stable > /dev/null
     else
         fail "Tov needs Rust 1.95 or newer, and this rustc is 1.$rust_minor: update it (or install rustup from https://rustup.rs), then run this again"
     fi

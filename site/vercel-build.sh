@@ -13,8 +13,8 @@ fi
 rust_minor=$(rustc --version 2>/dev/null | sed -n 's/^rustc 1\.\([0-9]*\).*/\1/p')
 if [ -z "$rust_minor" ] || [ "$rust_minor" -lt 95 ]; then
     if command -v rustup > /dev/null 2>&1; then
-        rustup toolchain install stable -q --profile minimal > /dev/null
-        rustup default stable > /dev/null
+        rustup -q toolchain install stable --profile minimal > /dev/null
+        rustup -q default stable > /dev/null
     else
         curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal > /dev/null
     fi
