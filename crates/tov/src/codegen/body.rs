@@ -1489,6 +1489,83 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
         }
         let facts = self.facts(m);
+        // `const f = (...) => ...` that this body only ever calls, `f(x)`, never passing it on,
+        // storing it or using it in another closure: its environment lives on the stack for as
+        // long as `f` does, its captures by address, as a callback's (no allocation per
+        // evaluation, nor a heap cell per iteration for a loop variable it reads)
+        let mut inner: FxSet<ExprId> = FxSet::default();
+        for &e in &exprs {
+            if matches!(ast.expr(e).kind, ExprKind::Arrow(_)) {
+                let mut nested = Vec::new();
+                collect_exprs_expr(ast, e, &mut nested);
+                inner.extend(nested.into_iter().filter(|&x| x != e));
+            }
+        }
+        let callees: FxSet<ExprId> = exprs.iter().filter_map(|&e| match &ast.expr(e).kind {
+            ExprKind::Call { callee, .. } => Some(*callee),
+            _ => None,
+        }).collect();
+        let mut const_arrows: FxMap<u32, ExprId> = FxMap::default();
+        for st in ast.stmts.iter() {
+            if let crate::ast::StmtKind::Let { mutable: false, name_span, init: Some(i), .. } = &st.kind
+                && matches!(&ast.expr(*i).kind, ExprKind::Arrow(a) if !a.is_async)
+                && exprs.contains(i)
+                && !inner.contains(i)
+            {
+                const_arrows.insert(name_span.start, *i);
+            }
+        }
+        // (not in an async function or a generator, whose locals live in a frame)
+        let framed = self.pending_async.is_some() || self.pending_gen.is_some();
+        if !const_arrows.is_empty() && !framed {
+            let mut used_otherwise: FxSet<u32> = FxSet::default();
+            for &e in &exprs {
+                if let ExprKind::Ident(_) = ast.expr(e).kind
+                    && let Some(IdentFact::Local(k)) = facts.idents.get(&e)
+                    && const_arrows.contains_key(k)
+                    && (!callees.contains(&e) || inner.contains(&e))
+                {
+                    used_otherwise.insert(*k);
+                }
+            }
+            for (k, ae) in const_arrows {
+                if used_otherwise.contains(&k) {
+                    continue;
+                }
+                let mut nested = Vec::new();
+                collect_exprs_expr(ast, ae, &mut nested);
+                if nested.iter().any(|&x| x != ae && matches!(ast.expr(x).kind, ExprKind::Arrow(_))) {
+                    continue;
+                }
+                // (what it captures is declared before it, so it's there when its environment is
+                // made; not itself; and it only reads them: the rest of the body is compiled
+                // knowing a local no heap closure shares changes only where it's written)
+                let at = ast.expr(ae).span.start;
+                let caps = arrow_captures(ast, facts, ae);
+                if !caps.iter().all(|&c| c != k && c < at) {
+                    continue;
+                }
+                let writes = nested.iter().any(|&x| match &ast.expr(x).kind {
+                    ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => local_root(ast, facts, *t).is_some_and(|r| caps.contains(&r)),
+                    ExprKind::Call { callee, args, .. } => {
+                        args.iter().any(|a| a.by_ref.is_some() && local_root(ast, facts, a.expr).is_some_and(|r| caps.contains(&r)))
+                            || matches!(&ast.expr(*callee).kind, ExprKind::Member { obj, name, .. } if is_mutating_method(self.c.interner.get(*name)) && local_root(ast, facts, *obj).is_some_and(|r| caps.contains(&r)))
+                    }
+                    _ => false,
+                });
+                // (and only numbers and booleans: the body releases a counted value after its
+                // last use there, not knowing a later call of `f` reads it)
+                let scalar = |t: TyId| matches!(self.tget(t), Ty::Int | Ty::F64 | Ty::F32 | Ty::Bool | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64);
+                let scalars = caps.iter().all(|&c| {
+                    exprs.iter().all(|&x| {
+                        !matches!(facts.idents.get(&x), Some(IdentFact::Local(l)) if *l == c) || facts.expr_ty.get(x as usize).is_some_and(|&t| scalar(t))
+                    })
+                });
+                if !writes && scalars {
+                    stack_arrows.insert(ae);
+                }
+            }
+        }
         for &e in &exprs {
             if matches!(ast.expr(e).kind, ExprKind::Arrow(_)) && !stack_arrows.contains(&e) {
                 for k in arrow_captures(ast, facts, e) {
@@ -4837,7 +4914,6 @@ impl<'c, 'a> Gen<'c, 'a> {
             ExprKind::Template(parts, exprs) => {
                 let vals: Vec<Val> = self.exprs_in_order(exprs);
                 let sbv = self.fresh("sb");
-                self.line(format!("tv_sb {sbv} = {{0}};"));
                 // (room for it all at once: the literal text, the strings' bytes, a number's worth
                 // for anything else; the builder never grows and copies on the way)
                 let lit: usize = parts.iter().map(|p| p.len()).sum();
@@ -9902,6 +9978,24 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// A `tv_fn` value for an arrow expression (environment on the heap).
     fn closure_value(&mut self, e: ExprId, fty: TyId) -> Val {
+        // (one only called while its captures are in scope: see `analyze_closures`)
+        if self.b().stack_arrows.contains(&e) {
+            let info = self.emit_arrow(e, fty, true);
+            if info.captures.is_empty() {
+                return Val::plain(format!("((tv_fn){{ (void *){}, NULL }})", info.cname), fty);
+            }
+            let ev = self.fresh("env");
+            let ptrs: Vec<String> = info
+                .captures
+                .iter()
+                .map(|(k, _, _)| {
+                    let access = self.b().locals.get(k).map(|l| l.access.clone()).unwrap_or_else(|| "tv__dummy".into());
+                    format!("&({access})")
+                })
+                .collect();
+            self.line(format!("{} {ev} = {{ {{-1, NULL}}, {} }};", info.env_type, ptrs.join(", ")));
+            return Val::plain(format!("((tv_fn){{ (void *){}, (tv_env *)&{ev} }})", info.cname), fty);
+        }
         let info = self.emit_arrow(e, fty, false);
         if info.captures.is_empty() {
             return Val::plain(format!("((tv_fn){{ (void *){}, NULL }})", info.cname), fty);
@@ -10458,5 +10552,22 @@ fn throws_out(ast: &ast::Ast, s: StmtId) -> bool {
         StmtKind::Block(ss) => ss.last().is_some_and(|&l| throws_out(ast, l)),
         StmtKind::If(_, t, Some(e)) => throws_out(ast, *t) && throws_out(ast, *e),
         _ => false,
+    }
+}
+
+/// The local a place is rooted in (`x`, `x.f`, `x[i]`, `x!`), if it's a local.
+fn local_root(ast: &ast::Ast, facts: &crate::check::ModuleFacts, mut e: ExprId) -> Option<u32> {
+    loop {
+        match &ast.expr(e).kind {
+            ExprKind::Paren(x) | ExprKind::NonNull(x) => e = *x,
+            ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } => e = *obj,
+            ExprKind::Ident(_) => {
+                return match facts.idents.get(&e).copied() {
+                    Some(IdentFact::Local(k)) => Some(k),
+                    _ => None,
+                };
+            }
+            _ => return None,
+        }
     }
 }
