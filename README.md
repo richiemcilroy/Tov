@@ -13,7 +13,7 @@ tov test src/              # run every *.test.ts (Jest's API: describe, it, expe
 1. **Run any TypeScript as it is.** Code written for TypeScript, Bun or Node should compile unchanged and behave exactly as it does there: the same semantics, Bun's and Node's APIs, npm packages.
 2. **Be the fastest way to run it.** Faster than Bun and Node, and at least as fast as C and Rust, using less memory, on every benchmark.
 
-Tov is early (version 0.0.1) and changes every day. Where it doesn't match TypeScript yet, the aim is that it tells you at compile time, with an error code and usually the fix, rather than quietly doing something different.
+Tov is early (version 0.1.0) and changes every day. Where it doesn't match TypeScript yet, the aim is that it tells you at compile time, with an error code and usually the fix, rather than quietly doing something different.
 
 ## Benchmarks
 

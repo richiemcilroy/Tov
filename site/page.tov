@@ -476,7 +476,7 @@ export function renderPage(footer: string): string {
 <pre id="install" hidden>${installLine}</pre>
 <div class="wrap">
   <header class="top">
-    <a class="brand" href="/" aria-label="Tov, home">${bird}<span class="name">tov<small>v0.0.1 experimental</small></span></a>
+    <a class="brand" href="/" aria-label="Tov, home">${bird}<span class="name">tov<small>v0.1.0 experimental</small></span></a>
     <nav aria-label="Main">
       <ul>
         <li class="optional"><a href="#speed">Benchmarks</a></li>
