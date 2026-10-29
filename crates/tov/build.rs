@@ -174,11 +174,21 @@ fn archive_toolchain() -> Option<(String, String, Option<String>)> {
         (out.status.success() && !s.is_empty()).then_some(s)
     };
     let apple = std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple");
-    Some(if apple {
-        (xcrun(&["--find", "clang"])?, xcrun(&["--find", "clang++"])?, xcrun(&["--show-sdk-path"]))
-    } else {
-        (std::env::var("CC").unwrap_or_else(|_| "cc".into()), std::env::var("CXX").unwrap_or_else(|_| "c++".into()), None)
-    })
+    if apple {
+        return Some((xcrun(&["--find", "clang"])?, xcrun(&["--find", "clang++"])?, xcrun(&["--show-sdk-path"])));
+    }
+    // (the compiler `tov build` picks, by the same path, or the archive's key never matches its
+    // and every first fetch() program compiles the runtime's TLS files again: ~180 ms)
+    let cc = std::env::var("CC").unwrap_or_else(|_| rt_flags::other_compiler());
+    let cxx = std::env::var("CXX").unwrap_or_else(|_| {
+        let path = Path::new(&cc);
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match name.strip_prefix("clang").map(|rest| format!("clang++{rest}")).or_else(|| name.strip_prefix("gcc").map(|rest| format!("g++{rest}"))) {
+            Some(n) => path.with_file_name(n).to_string_lossy().into_owned(),
+            None => "c++".into(),
+        }
+    });
+    Some((cc, cxx, None))
 }
 
 /// The TLS files under `prefix/` (vendor or runtime) compiled with tls_flags into `archive`.
