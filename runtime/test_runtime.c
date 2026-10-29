@@ -2364,8 +2364,9 @@ static void test_math_misc(void) {
     e2->drop = NULL;
     tv_env_release(e2);
 
-    /* realloc / free wrappers */
-    char *p = tv_alloc(0);
+    /* realloc / free wrappers (a size of 0 the compiler can't see: GCC rejects tv_alloc(0)) */
+    volatile size_t zero = 0;
+    char *p = tv_alloc(zero);
     p = tv_realloc(p, 100);
     memset(p, 1, 100);
     tv_free(p);
