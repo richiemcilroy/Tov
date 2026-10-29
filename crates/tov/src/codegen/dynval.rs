@@ -238,7 +238,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             if !matches!(self.tget(t), Ty::Func(..) | Ty::Promise(..) | Ty::Gen(_) | Ty::AsyncGen(_)) {
                 let w = self.json_writer(t);
                 let ct = self.ctype(t);
-                let _ = writeln!(json, "    if (v->t == {d}) {{ {w}(sb, (const {ct} *)tv_dyn_data(*v), ind, lvl); return; }}");
+                let _ = writeln!(json, "    if (v->t == {d}) {{ {w}(sb, ({ct} const *)tv_dyn_data(*v), ind, lvl); return; }}");
             }
             if matches!(self.tget(t), Ty::Class(..)) {
                 let _ = writeln!(objs, "    if (d.t == {d}) return *(void **)tv_dyn_data(d);");

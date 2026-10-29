@@ -43,9 +43,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             return name;
         }
         let ct = self.ctype(t);
-        let _ = writeln!(self.protos, "static void {name}(tv_sb *sb, const {ct} *v, tv_str ind, int lvl);");
+        let _ = writeln!(self.protos, "static void {name}(tv_sb *sb, {ct} const *v, tv_str ind, int lvl);");
         let body = self.json_write_body(t);
-        self.helpers_after.push(format!("static void {name}(tv_sb *sb, const {ct} *v, tv_str ind, int lvl) {{\n    (void)ind; (void)lvl;\n{body}}}\n"));
+        self.helpers_after.push(format!("static void {name}(tv_sb *sb, {ct} const *v, tv_str ind, int lvl) {{\n    (void)ind; (void)lvl;\n{body}}}\n"));
         name
     }
 
@@ -96,7 +96,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                         b.push_str("    tv_sb_add_char(sb, ',');\n");
                     }
                     let place = self.fld(t, "*v", self.sym(f.name));
-                    let _ = writeln!(b, "    tvg_js_nl(sb, ind, lvl + 1);\n    {w}(sb, (const {ct} *)&{place}, ind, lvl + 1);");
+                    let _ = writeln!(b, "    tvg_js_nl(sb, ind, lvl + 1);\n    {w}(sb, ({ct} const *)&{place}, ind, lvl + 1);");
                 }
                 b.push_str("    tvg_js_nl(sb, ind, lvl);\n    tv_sb_add_char(sb, ']');\n");
                 b
@@ -147,7 +147,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                         let w = self.json_writer(m);
                         // (a class member is `K *const`: the writer takes `const K **`)
                         let mct = self.ctype(m);
-                        let _ = writeln!(b, "    case {i}: {w}(sb, (const {mct} *)&v->u.m{i}, ind, lvl); break;");
+                        let _ = writeln!(b, "    case {i}: {w}(sb, ({mct} const *)&v->u.m{i}, ind, lvl); break;");
                     }
                 }
                 b.push_str("    default: tv_sb_push_cstr(sb, \"null\"); break;\n    }\n");
@@ -211,7 +211,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             let skip = self.json_is_undefined(*ty, lv);
             let _ = writeln!(
                 b,
-                "    if (!({skip})) {{\n        if (__builtin_expect(!ind.p->len, 1)) tv_sb_add(sb, {compact});\n        else {{\n            if (!first) tv_sb_add_char(sb, ',');\n            tvg_js_nl(sb, ind, lvl + 1);\n            tv_sb_add(sb, {key});\n            tv_sb_add(sb, \": \", 2);\n        }}\n        first = false;\n        {w}(sb, (const {ct} *)&{lv}, ind, lvl + 1);\n    }}"
+                "    if (!({skip})) {{\n        if (__builtin_expect(!ind.p->len, 1)) tv_sb_add(sb, {compact});\n        else {{\n            if (!first) tv_sb_add_char(sb, ',');\n            tvg_js_nl(sb, ind, lvl + 1);\n            tv_sb_add(sb, {key});\n            tv_sb_add(sb, \": \", 2);\n        }}\n        first = false;\n        {w}(sb, ({ct} const *)&{lv}, ind, lvl + 1);\n    }}"
             );
         }
         b.push_str("    if (!first) tvg_js_nl(sb, ind, lvl);\n    tv_sb_add_char(sb, '}');\n");

@@ -3594,7 +3594,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             let mut facts: Vec<(String, u64)> = fixed.iter().filter(|(k, (_, from))| at >= *from && used.contains(*k)).filter_map(|(k, (n, _))| self.b().locals.get(k).map(|l| (l.access.clone(), *n))).collect();
             facts.sort();
             for (access, n) in facts {
-                self.line(format!("__builtin_assume(({access}).p->len == {n});"));
+                self.line(format!("TV_ASSUME(({access}).p->len == {n});"));
             }
         }
         // (a loop that is all JavaScript's: run as one JavaScript function)

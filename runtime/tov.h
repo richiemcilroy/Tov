@@ -90,6 +90,14 @@ void tv_free(void *p);
 /* Zero-initialize ({0}) before use. `data` is owned by the runtime (it sits inside a
  * larger allocation so tv_str_from_sb can adopt it without copying): read it freely, but
  * release it only with tv_sb_free / tv_str_from_sb / tv_out_sb_line, never free(). */
+/* A fact the C compiler may rely on (clang's __builtin_assume; elsewhere the same, as an
+ * unreachable branch: gcc has no __builtin_assume). The condition has no side effects. */
+#if defined(__clang__)
+#define TV_ASSUME(x) __builtin_assume(x)
+#else
+#define TV_ASSUME(x) do { if (!(x)) __builtin_unreachable(); } while (0)
+#endif
+
 typedef struct tv_sb {
     char *data;
     size_t len, cap;
