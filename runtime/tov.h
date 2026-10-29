@@ -1210,6 +1210,12 @@ void tv_init(int argc, char **argv);
 #if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
 #define TV_SANITIZED 1
 #endif
+#if __has_feature(address_sanitizer)
+#define TV_ASAN 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) && !defined(TV_ASAN)
+#define TV_ASAN 1
 #endif
 #if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__)) && !defined(TV_SANITIZED) && !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__)
 #define TV_STACK_SWITCH 1

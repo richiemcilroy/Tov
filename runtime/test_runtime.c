@@ -439,7 +439,9 @@ static void test_string_methods(void) {
     CHECK(tv_str_char_count(S("")) == 0);
     CHECK(tv_str_char_count(S("aaaaaaaaaaéééééééééé😀😀😀x")) == 24);
     CHECK_STR_ARR(tv_str_chars(s), "h", "é", "l", "l", "o", "😀");
-    CHECK(tv_arr_len(tv_str_chars(S(""))) == 0);
+    tv_arr no_chars = tv_str_chars(S(""));
+    CHECK(tv_arr_len(no_chars) == 0);
+    tv_arr_release(no_chars, &tv_type_str);
 
     tv_str h = S("hello");
     CHECK_STR(tv_str_slice(h, 1, 3, true, "t"), "el");
@@ -486,7 +488,9 @@ static void test_string_methods(void) {
     CHECK_STR_ARR(tv_str_split(S("a,b,,c"), S(",")), "a", "b", "", "c");
     CHECK_STR_ARR(tv_str_split(S("abc"), S("")), "a", "b", "c");
     CHECK_STR_ARR(tv_str_split(S(""), S(",")), "");
-    CHECK(tv_arr_len(tv_str_split(S(""), S(""))) == 0);
+    tv_arr no_parts = tv_str_split(S(""), S(""));
+    CHECK(tv_arr_len(no_parts) == 0);
+    tv_arr_release(no_parts, &tv_type_str);
     CHECK_STR_ARR(tv_str_split(S("a--b--"), S("--")), "a", "b", "");
     CHECK_STR_ARR(tv_str_split(S("--"), S("--")), "", "");
     CHECK_STR_ARR(tv_str_split(S("abc"), S("x")), "abc");
@@ -656,8 +660,10 @@ static void test_array_ownership(void) {
     tv_arr_release(s1, &obj_type);
     tv_arr_release(s2, &obj_type);
     tv_arr_release(s3, &obj_type);
+    tv_arr_release(s4, &obj_type);
     tv_arr_release(s5, &obj_type);
     tv_arr_release(s6, &obj_type);
+    tv_arr_release(s7, &obj_type);
 
     /* concat */
     tv_arr c = tv_arr_concat(a, a, &obj_type);

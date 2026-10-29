@@ -81,9 +81,17 @@ static _Noreturn void tv_oom(size_t size) {
 /* `size` bytes of zeros straight from the kernel: its pages are touched (and counted) only as
  * they're written, unlike malloc's, which zeroing would touch at once. Never freed: for tables
  * made at first use. */
+#if defined(__linux__) && defined(TV_ASAN)
+void __lsan_register_root_region(const void *p, size_t size);
+#endif
 static void *tv_zero_pages(size_t size) {
     void *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (TV_UNLIKELY(p == MAP_FAILED)) tv_oom(size);
+#if defined(__linux__) && defined(TV_ASAN)
+    /* (LeakSanitizer looks for pointers in the program's data and the heap, not in pages it
+     * mapped: what these tables keep would be reported lost) */
+    __lsan_register_root_region(p, size);
+#endif
     return p;
 }
 
