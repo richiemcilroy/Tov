@@ -321,17 +321,17 @@ static void test_number_format(void) {
         tv_sb_push_f64(&sb, cases[i].v);
         check_sb_(__LINE__, &sb, cases[i].s);
     }
-    /* f32 prints the shortest digits that round-trip as a float */
+    /* f32 prints as the number it holds, as a Float32Array's element does in JavaScript */
     float f = 0.1f;
     tv_sb sb = {0};
     tv_type_f32.to_str(&sb, &f);
-    CHECK_SB(sb, "0.1");
+    CHECK_SB(sb, "0.10000000149011612");
     f = 16777216.0f;
     tv_type_f32.to_str(&sb, &f);
     CHECK_SB(sb, "16777216");
     f = 123456789.0f;
     tv_type_f32.to_str(&sb, &f);
-    CHECK_SB(sb, "123456790");
+    CHECK_SB(sb, "123456792");
     f = -0.0f;
     tv_type_f32.to_str(&sb, &f);
     CHECK_SB(sb, "0");
@@ -339,7 +339,7 @@ static void test_number_format(void) {
     CHECK_SB(sb, "-0");
     f = 1e-10f;
     tv_type_f32.to_str(&sb, &f);
-    CHECK_SB(sb, "1e-10");
+    CHECK_SB(sb, "1.000000013351432e-10");
 
     /* toFixed; expected values from Node x.toFixed(0..5) */
     static const struct { double v; const char *s[6]; } fx[] = {
