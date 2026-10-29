@@ -546,9 +546,15 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let mut program_flags = flags.clone();
     let include;
     if let Some(h) = &pch {
-        include = h.to_string_lossy().into_owned();
-        program_flags.push("-include");
-        program_flags.push(&include);
+        // (clang: the precompiled header itself, unchecked against the header it was made from,
+        // which may be elsewhere: it's named by its contents' hash, and made by Tov's build)
+        if is_clang(&cc) {
+            include = format!("{}.pch", h.display());
+            program_flags.extend(["-include-pch", include.as_str(), "-Xclang", "-fno-validate-pch"]);
+        } else {
+            include = h.to_string_lossy().into_owned();
+            program_flags.extend(["-include", include.as_str()]);
+        }
     }
     // (the program's own code to an object, then linked, when a library it links still has to
     // be compiled: the program compiles meanwhile rather than after; otherwise one command
@@ -991,14 +997,26 @@ const LINK_FLAGS: &str = "dead-strip; dead-strip-dylibs; exported: _main; -x unl
 /// The precompiled fixed prefix (`pre-<key>.h`, with its `.pch`/`.gch` beside it) to pass as
 /// `-include`, built on first use; `None` if the compiler can't precompile it (then programs
 /// are compiled whole, which is only slower).
+fn is_clang(cc: &str) -> bool {
+    cfg!(target_vendor = "apple") || Path::new(cc).file_name().is_some_and(|n| n.to_string_lossy().contains("clang"))
+}
+
 fn precompiled_header(cc: &str, flags: &[&str], c_dir: &Path, prefix: &str, rt_key: &str) -> Option<PathBuf> {
-    let clang = cfg!(target_vendor = "apple") || Path::new(cc).file_name().is_some_and(|n| n.to_string_lossy().contains("clang"));
+    let clang = is_clang(cc);
     let key = hash_hex(&[prefix.as_bytes(), rt_key.as_bytes()]);
     let header = c_dir.join(format!("pre-{key}.h"));
     let pch = c_dir.join(format!("pre-{key}.h.{}", if clang { "pch" } else { "gch" }));
     // (not the header's time: clang checks the precompiled header against it)
     if cached(&pch) && header.is_file() {
         return Some(header);
+    }
+    // (compiled with Tov, for its default flags and compiler: written out as it is)
+    if clang && key == tls_files::PREBUILT_PCH_KEY && !tls_files::PREBUILT_PCH.is_empty() {
+        let tmp = c_dir.join(format!("pre-{key}.tmp{}.pch", tmp_tag()));
+        if (header.is_file() || write_new(&header, |t| std::fs::write(t, prefix)).is_ok()) && std::fs::write(&tmp, tls_files::PREBUILT_PCH).and_then(|_| std::fs::rename(&tmp, &pch)).is_ok() {
+            return Some(header);
+        }
+        let _ = std::fs::remove_file(&tmp);
     }
     let pid = tmp_tag();
     let tmp_h = c_dir.join(format!("pre-{key}.tmp{pid}.h"));

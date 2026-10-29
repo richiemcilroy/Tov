@@ -74,11 +74,18 @@ fn main() {
         }
         None => code.push_str("pub const RUNTIME_ARCHIVE_KEY: &str = \"\";\npub static RUNTIME_ARCHIVE: &[u8] = &[];\n"),
     }
-    match prebuilt_runtime(&root, &out_dir) {
+    let rt = prebuilt_runtime(&root, &out_dir);
+    match &rt {
         Some((key, path)) => {
             let _ = writeln!(code, "/// The runtime compiled with the default flags (rt_flags), and its cache key.\npub const PREBUILT_RT_KEY: &str = \"{key}\";\npub static PREBUILT_RT: &[u8] = include_bytes!({:?});", path.to_string_lossy());
         }
         None => code.push_str("pub const PREBUILT_RT_KEY: &str = \"\";\npub static PREBUILT_RT: &[u8] = &[];\n"),
+    }
+    match rt.and_then(|(rt_key, _)| prebuilt_pch(&root, &out_dir, &rt_key)) {
+        Some((key, path)) => {
+            let _ = writeln!(code, "/// The fixed prefix precompiled (clang's PCH) with the default flags, and its key.\npub const PREBUILT_PCH_KEY: &str = \"{key}\";\npub static PREBUILT_PCH: &[u8] = include_bytes!({:?});", path.to_string_lossy());
+        }
+        None => code.push_str("pub const PREBUILT_PCH_KEY: &str = \"\";\npub static PREBUILT_PCH: &[u8] = &[];\n"),
     }
     let out = out_dir.join("tls_files.rs");
     std::fs::write(out, code).unwrap();
@@ -283,6 +290,44 @@ fn node_shims(root: &Path) {
 
 /// The runtime (runtime/tov.c and its parts, one translation unit) compiled as `tov build`
 /// compiles it with the default flags and this machine's compiler: (its cache key, the object).
+/// The fixed prefix every program's C starts with (rt_flags::fixed_prefix) precompiled as `tov
+/// build` precompiles it (build.rs's precompiled_header, same key) with the default flags, for
+/// clang: (its key, path). A machine's first build otherwise spends ~100 ms on it before the
+/// program's code can compile. (clang only: GCC's precompiled headers stay where they're made.)
+fn prebuilt_pch(root: &Path, out_dir: &Path, rt_key: &str) -> Option<(String, PathBuf)> {
+    let read = |f: &Path| std::fs::read_to_string(f).ok();
+    let prelude_path = root.join("crates/tov/src/codegen/prelude.h");
+    println!("cargo:rerun-if-changed={}", prelude_path.display());
+    println!("cargo:rerun-if-changed={}", root.join("runtime/js.h").display());
+    let prefix = rt_flags::fixed_prefix(&read(&root.join("runtime/tov.h"))?, &read(&root.join("runtime/js.h"))?, &read(&prelude_path)?);
+    let (cc, sysroot) = if cfg!(target_vendor = "apple") {
+        match rt_flags::xcrun_toolchain() {
+            Some((c, s)) => (c, Some(s)),
+            None => (rt_flags::other_compiler(), None),
+        }
+    } else {
+        (rt_flags::other_compiler(), None)
+    };
+    if !(cfg!(target_vendor = "apple") || Path::new(&cc).file_name().is_some_and(|n| n.to_string_lossy().contains("clang"))) {
+        return None;
+    }
+    let flags = rt_flags::base_flags("-O3", false, false, false, sysroot.as_deref());
+    let key = tls_flags::hash_hex(&[prefix.as_bytes(), rt_key.as_bytes()]);
+    let pch = out_dir.join(format!("pre-{key}.h.pch"));
+    if pch.is_file() {
+        return Some((key, pch));
+    }
+    let header = out_dir.join(format!("pre-{key}.h"));
+    std::fs::write(&header, &prefix).ok()?;
+    let tmp = out_dir.join(format!("pre-{key}.tmp.pch"));
+    let ok = Command::new(&cc).args(&flags).args(["-x", "c-header", "-o"]).arg(&tmp).arg(&header).status().map(|s| s.success()).unwrap_or(false);
+    if !ok {
+        return None;
+    }
+    std::fs::rename(&tmp, &pch).ok()?;
+    Some((key, pch))
+}
+
 fn prebuilt_runtime(root: &Path, out_dir: &Path) -> Option<(String, PathBuf)> {
     let read = |f: &str| std::fs::read_to_string(root.join("runtime").join(f)).ok();
     let h = read("tov.h")?;
