@@ -7777,11 +7777,27 @@ tv_arr tv_native_cryptoDigestBytes(tv_int h) {
 
 tv_str tv_native_bytesEncode(tv_arr bytes, tv_str enc) { return tv_bytes_encode((const uint8_t *)tv_arr_data(bytes), (size_t)tv_arr_len(bytes), enc); }
 
+/* (getrandom on Linux: glibc has arc4random_buf only from 2.36) */
+#if defined(__linux__)
+#include <sys/random.h>
+void tv_random_bytes(void *p, size_t n) {
+    uint8_t *b = p;
+    while (n) {
+        ssize_t r = getrandom(b, n, 0);
+        if (r <= 0) { if (errno == EINTR) continue; tv_trap("no random bytes from the system", NULL); }
+        b += r;
+        n -= (size_t)r;
+    }
+}
+#else
+void tv_random_bytes(void *p, size_t n) { arc4random_buf(p, n); }
+#endif
+
 tv_arr tv_native_cryptoRandomBytes(tv_int n) {
     if (n < 0) n = 0;
     tv_arr a = tv_arr_with_capacity(&tv_type_u8, n);
     if (tv_crypto) tv_crypto->random((uint8_t *)tv_arr_data(a), (size_t)n);
-    else arc4random_buf(tv_arr_data(a), (size_t)n);
+    else tv_random_bytes(tv_arr_data(a), (size_t)n);
     a.p->len = n;
     return a;
 }
@@ -7789,7 +7805,7 @@ tv_arr tv_native_cryptoRandomBytes(tv_int n) {
 tv_str tv_native_cryptoRandomUUID(void) {
     uint8_t b[16];
     if (tv_crypto) tv_crypto->random(b, 16);
-    else arc4random_buf(b, 16);
+    else tv_random_bytes(b, 16);
     b[6] = (uint8_t)((b[6] & 0x0f) | 0x40);
     b[8] = (uint8_t)((b[8] & 0x3f) | 0x80);
     static const char digits[] = "0123456789abcdef";

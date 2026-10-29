@@ -1809,7 +1809,7 @@ NATIVE(n_crypto_random_fill) {
     size_t len;
     if (n < 1 || !tv_js_bytes_view(a[0], &p, &len)) return undef(ctx);
     if (tv_crypto) tv_crypto->random(p, len);
-    else arc4random_buf(p, len);
+    else tv_random_bytes(p, len);
     return undef(ctx);
 }
 

@@ -74,6 +74,7 @@ _Noreturn void tv_trap(const char *msg, const char *loc);
 /* traps on out-of-memory; fresh memory nothing else points to (the C compiler may assume so) */
 __attribute__((malloc, alloc_size(1), returns_nonnull)) void *tv_alloc(size_t size);
 void tv_write_fd(int fd, const char *s, size_t n); /* all of s to fd 1 or 2, unbuffered */
+void tv_random_bytes(void *p, size_t n);          /* cryptographically secure, from the system */
 void tv_err_cstr(const char *s);                     /* to stderr */
 
 /* Small objects (strings, boxes, class instances, closures' cells: up to 512 bytes) come from
