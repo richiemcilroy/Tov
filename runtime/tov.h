@@ -1437,6 +1437,9 @@ typedef struct tv_tls_ops {
     tv_tls *(*accept)(int fd, void *server);
     /* the peer's certificate checked out (a client with verification on) */
     bool (*verified)(tv_tls *t);
+    /* the connection's bytes through rd and wr instead of its socket (> 0 bytes, 0 the end, -1
+     * not yet, < -1 failed) */
+    void (*set_io)(tv_tls *t, void *io, long (*rd)(void *io, void *buf, size_t n), long (*wr)(void *io, const void *buf, size_t n));
 } tv_tls_ops;
 extern const tv_tls_ops *tv_tls_impl;
 /* Streaming body decoders (runtime/codecs.c, in the same archive): set by tv_tls_install too.

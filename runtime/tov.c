@@ -9443,6 +9443,16 @@ void tv_async_run(void) {
 #else
 #include <sys/epoll.h>
 #endif
+/* fetch's socket I/O through io_uring rings when there are many connections (tv_ur_enter) */
+#if defined(__linux__) && defined(__has_include)
+#if __has_include(<linux/io_uring.h>)
+#include <linux/io_uring.h>
+#include <sys/syscall.h>
+#if defined(IORING_CQ_EVENTFD_DISABLED) && defined(IORING_FEAT_FAST_POLL) && defined(__NR_io_uring_setup)
+#define TV_URING 1
+#endif
+#endif
+#endif
 
 typedef struct tv_http_conn {
     int fd;
@@ -10194,6 +10204,10 @@ int tv_io_refs;
 void (*tv_io_after_batch)(void);
 /* Before the loop waits for events (runtime/net.c writes out what sockets were given). */
 static void (*tv_loop_before_wait_net)(void);
+#ifndef TV_KQUEUE
+/* io_uring rings' completions, taken before the loop waits and after (tv_ur_poll) */
+static bool (*tv_loop_rings)(int *timeout);
+#endif
 void (*tv_io_after_fork)(void);
 
 static int tv_loop_queue(void) {
@@ -10405,13 +10419,18 @@ static void tv_http_loop(void) {
         int timeout = -1;
         if (due) timeout = due > now_ms ? (int)(due - now_ms) : 0;
         if (tv_loop_check_pending) timeout = 0; /* (a pending check phase doesn't wait) */
+        bool rang = tv_loop_rings && tv_loop_rings(&timeout);
         if (timeout != 0 && tv_loop_will_block) tv_loop_will_block();
         int n = epoll_wait(tv_http_q, events, 256, timeout);
+        if (tv_loop_rings && tv_loop_rings(NULL)) rang = true;
 #endif
         if (n < 0) { if (errno == EINTR) continue; break; }
         tv_http_refresh_date();
         if (timed) tv_fire_timers();
         bool worked = false;
+#ifndef TV_KQUEUE
+        if (rang) worked = true;
+#endif
         for (int i = 0; i < n; i++) {
 #ifdef TV_KQUEUE
             void *tag = events[i].udata;
@@ -11365,6 +11384,19 @@ struct tv_fc {
     struct tv_fc *dial_next;
     char *in;
     size_t in_off, in_len, in_cap;
+#ifdef TV_URING
+    struct tv_ur *ur;          /* its reads and writes go through this ring, not the event queue */
+    char *ubuf;                /* received through the ring, not taken yet: [uoff, ulen) */
+    uint32_t uoff, ulen, ucap;
+    uint8_t uops;              /* the ring's operations on it in flight (a receive, a send) */
+    bool urecv, usend, ueof, ukick;
+    int uerr;
+    tv_fr *usend_r;            /* the request whose bytes are being sent */
+    char *usbuf;               /* ... a copy of them, so they outlive the request */
+    size_t uscap, uslen;
+    tv_sb upend;               /* TLS records to send after the send in flight */
+    struct tv_fc *ukick_next;  /* has received bytes to deliver (tv_ur_kicks) */
+#endif
 };
 
 #define TV_ORIGIN_BUCKETS 64
@@ -11399,6 +11431,399 @@ static void tv_fc_rbuf_free(char *p, size_t cap) {
 static void tv_fc_rbufs_flush(void) {
     while (tv_fc_nrbufs) tv_free(tv_fc_rbufs[--tv_fc_nrbufs]);
 }
+
+/* ---- io_uring rings (Linux)
+
+   With many connections open, fetch's loop spends most of its time in the kernel: each request's
+   send and read run the whole loopback TCP path on the loop's thread. Rings with a kernel thread
+   that takes their submissions (SQPOLL) run that work on other cores, the loop only filling
+   in submissions and taking completions: no system calls while they're busy. Connections in
+   use move onto a ring (tv_ur_enter) once TV_UR_MIN are open; their reads land in a buffer of
+   their own (ubuf), which tv_fc_recv hands out as read() would (TLS's through tls.c's set_io),
+   a completion standing in for the event queue's readiness. Connecting, TLS handshakes, tunnels
+   and bodies received on a thread stay on the event queue. Without rings (an older kernel, a seccomp profile that
+   forbids them, TOV_URING=0) everything does; TOV_URING=n uses them from n connections. */
+#ifdef TV_URING
+#define TV_UR_RINGS 2
+#define TV_UR_MIN 16            /* open connections before rings are used (by default) */
+#define TV_UR_ENTRIES 256       /* submissions a ring holds: two per connection on it */
+#define TV_UR_BUF ((uint32_t)16 << 10)
+typedef struct tv_ur {
+    int fd, efd;
+    unsigned *sq_head, *sq_tail, *sq_mask, *sq_flags, *sq_array;
+    unsigned *cq_head, *cq_tail, *cq_mask, *cq_flags;
+    struct io_uring_sqe *sqes;
+    struct io_uring_cqe *cqes;
+    void *sq_map, *cq_map;
+    size_t sq_len, cq_len, sqes_len;
+    unsigned entries;
+    int conns;
+} tv_ur;
+static tv_ur tv_urs[TV_UR_RINGS];
+static int tv_ur_n = -1;        /* rings set up (-1: not tried yet) */
+static unsigned tv_ur_next;
+static int tv_fc_nopen;         /* fetch connections open */
+static int tv_ur_min = -1;      /* (-1: TOV_URING not read yet; 0: no rings) */
+static tv_fc *tv_ur_kicks;      /* connections with received bytes to deliver */
+static void tv_ur_ready_io(tv_io *h, bool readable, bool writable, bool broken) { (void)h; (void)readable; (void)writable; (void)broken; tv_io_quiet = true; }
+static tv_io tv_ur_io = { tv_ur_ready_io };
+static bool tv_ur_poll(int *timeout);
+
+static bool tv_ur_setup_one(tv_ur *u) {
+    struct io_uring_params p;
+    memset(&p, 0, sizeof p);
+    p.flags = IORING_SETUP_SQPOLL | IORING_SETUP_CQSIZE;
+    p.sq_thread_idle = 2; /* ms its kernel thread keeps polling after the last submission */
+    p.cq_entries = TV_UR_ENTRIES * 4;
+    int fd = (int)syscall(__NR_io_uring_setup, TV_UR_ENTRIES, &p);
+    if (fd < 0) return false;
+    if (!(p.features & IORING_FEAT_FAST_POLL) || !(p.features & IORING_FEAT_NODROP) || !p.cq_off.flags) { close(fd); return false; }
+    u->fd = fd;
+    u->sq_len = p.sq_off.array + p.sq_entries * sizeof(unsigned);
+    u->cq_len = p.cq_off.cqes + p.cq_entries * sizeof(struct io_uring_cqe);
+    bool single = (p.features & IORING_FEAT_SINGLE_MMAP) != 0;
+    if (single) u->sq_len = u->cq_len = u->sq_len > u->cq_len ? u->sq_len : u->cq_len;
+    u->sq_map = mmap(NULL, u->sq_len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQ_RING);
+    if (u->sq_map == MAP_FAILED) { close(fd); return false; }
+    u->cq_map = single ? u->sq_map : mmap(NULL, u->cq_len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_CQ_RING);
+    u->sqes_len = p.sq_entries * sizeof(struct io_uring_sqe);
+    u->sqes = u->cq_map == MAP_FAILED ? MAP_FAILED : mmap(NULL, u->sqes_len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQES);
+    if (u->cq_map == MAP_FAILED || u->sqes == MAP_FAILED) {
+        if (u->cq_map != MAP_FAILED && !single) munmap(u->cq_map, u->cq_len);
+        munmap(u->sq_map, u->sq_len);
+        close(fd);
+        return false;
+    }
+    char *sq = u->sq_map, *cq = u->cq_map;
+    u->sq_head = (unsigned *)(sq + p.sq_off.head);
+    u->sq_tail = (unsigned *)(sq + p.sq_off.tail);
+    u->sq_mask = (unsigned *)(sq + p.sq_off.ring_mask);
+    u->sq_flags = (unsigned *)(sq + p.sq_off.flags);
+    u->sq_array = (unsigned *)(sq + p.sq_off.array);
+    u->cq_head = (unsigned *)(cq + p.cq_off.head);
+    u->cq_tail = (unsigned *)(cq + p.cq_off.tail);
+    u->cq_mask = (unsigned *)(cq + p.cq_off.ring_mask);
+    u->cq_flags = (unsigned *)(cq + p.cq_off.flags);
+    u->cqes = (struct io_uring_cqe *)(cq + p.cq_off.cqes);
+    u->entries = p.sq_entries;
+    /* completions wake the loop through an eventfd, told of them only when the loop waits */
+    __atomic_store_n(u->cq_flags, IORING_CQ_EVENTFD_DISABLED, __ATOMIC_RELEASE);
+    u->efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (u->efd < 0 || syscall(__NR_io_uring_register, fd, IORING_REGISTER_EVENTFD, &u->efd, 1) != 0) {
+        if (u->efd >= 0) close(u->efd);
+        munmap(u->sqes, u->sqes_len);
+        if (!single) munmap(u->cq_map, u->cq_len);
+        munmap(u->sq_map, u->sq_len);
+        close(fd);
+        return false;
+    }
+    struct epoll_event ev = { .events = EPOLLIN | EPOLLET, .data.ptr = (void *)((uintptr_t)&tv_ur_io | 1) };
+    epoll_ctl(tv_loop_queue(), EPOLL_CTL_ADD, u->efd, &ev);
+    u->conns = 0;
+    return true;
+}
+
+static bool tv_ur_ready(void) {
+    if (tv_ur_n >= 0) return tv_ur_n > 0;
+    tv_ur_n = 0;
+    if (sysconf(_SC_NPROCESSORS_ONLN) < 4) return false; /* (their kernel threads need cores of their own) */
+    for (; tv_ur_n < TV_UR_RINGS; tv_ur_n++) if (!tv_ur_setup_one(&tv_urs[tv_ur_n])) break;
+    if (tv_ur_n) tv_loop_rings = tv_ur_poll;
+    return tv_ur_n > 0;
+}
+
+static struct io_uring_sqe *tv_ur_sqe(tv_ur *u) {
+    unsigned tail = *u->sq_tail, head = __atomic_load_n(u->sq_head, __ATOMIC_ACQUIRE);
+    if (tail - head >= u->entries) return NULL;
+    unsigned i = tail & *u->sq_mask;
+    struct io_uring_sqe *s = &u->sqes[i];
+    memset(s, 0, sizeof *s);
+    u->sq_array[i] = i;
+    return s;
+}
+
+static void tv_ur_submit(tv_ur *u) {
+    __atomic_store_n(u->sq_tail, *u->sq_tail + 1, __ATOMIC_RELEASE);
+    /* (its kernel thread stopped polling after idling: wake it) */
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (__atomic_load_n(u->sq_flags, __ATOMIC_RELAXED) & IORING_SQ_NEED_WAKEUP)
+        syscall(__NR_io_uring_enter, u->fd, 0, 0, IORING_ENTER_SQ_WAKEUP, NULL, 0);
+}
+
+enum { TV_UR_RECV = 1, TV_UR_SEND = 2 };
+
+/* A receive into the connection's buffer (its bytes all taken). */
+static void tv_ur_post_recv(tv_fc *c) {
+    if (c->urecv || c->ueof || c->uerr) return;
+    struct io_uring_sqe *s = tv_ur_sqe(c->ur);
+    if (!s) { c->uerr = ENOBUFS; return; }
+    if (!c->ubuf) { c->ucap = TV_UR_BUF; c->ubuf = tv_alloc(c->ucap); }
+    c->uoff = c->ulen = 0;
+    s->opcode = IORING_OP_RECV;
+    s->fd = c->fd;
+    s->addr = (uint64_t)(uintptr_t)c->ubuf;
+    s->len = c->ucap;
+    s->user_data = (uint64_t)(uintptr_t)c | TV_UR_RECV;
+    c->urecv = true;
+    c->uops++;
+    tv_ur_submit(c->ur);
+}
+
+static long tv_ur_recv(tv_fc *c, char *buf, size_t n);
+
+/* Bytes to send in order (TLS records): sent at once, or after the send in flight. */
+static void tv_ur_send_buf(tv_fc *c) {
+    struct io_uring_sqe *s = tv_ur_sqe(c->ur);
+    if (!s) { c->uerr = ENOBUFS; return; }
+    s->opcode = IORING_OP_SEND;
+    s->fd = c->fd;
+    s->addr = (uint64_t)(uintptr_t)c->usbuf;
+    s->len = (uint32_t)c->uslen;
+    s->msg_flags = MSG_NOSIGNAL;
+    s->user_data = (uint64_t)(uintptr_t)c | TV_UR_SEND;
+    c->usend = true;
+    c->uops++;
+    tv_ur_submit(c->ur);
+}
+
+static long tv_ur_tls_rd(void *io, void *buf, size_t n) { return tv_ur_recv(io, buf, n); }
+
+static long tv_ur_tls_wr(void *io, const void *buf, size_t n) {
+    tv_fc *c = io;
+    if (c->uerr) return -3;
+    if (c->usend) { tv_sb_push(&c->upend, buf, n); return (long)n; }
+    if (c->uscap < n) {
+        tv_free(c->usbuf);
+        c->uscap = n < 1024 ? 1024 : n;
+        c->usbuf = tv_alloc(c->uscap);
+    }
+    memcpy(c->usbuf, buf, n);
+    c->uslen = n;
+    c->usend_r = NULL;
+    tv_ur_send_buf(c);
+    return c->uerr ? -3 : (long)n;
+}
+
+/* Moves an idle connection's I/O onto a ring (from the event queue), once enough are open. */
+static void tv_ur_enter(tv_fc *c) {
+    if (tv_ur_min < 0) {
+        const char *env = getenv("TOV_URING");
+        tv_ur_min = env && *env ? (atoi(env) > 0 ? atoi(env) : 0) : TV_UR_MIN;
+    }
+    if (c->ur || c->fd < 0 || c->bulk || (c->tls && !tv_tls_impl->set_io) || !tv_ur_min || tv_fc_nopen < tv_ur_min || !tv_ur_ready()) return;
+    tv_ur *u = NULL;
+    for (int k = 0; k < tv_ur_n && !u; k++) {
+        tv_ur *t = &tv_urs[(tv_ur_next + (unsigned)k) % (unsigned)tv_ur_n];
+        if (t->conns < (int)t->entries / 2) u = t;
+    }
+    if (!u) return;
+    tv_ur_next++;
+    if (c->registered) epoll_ctl(tv_loop_queue(), EPOLL_CTL_DEL, c->fd, NULL);
+    c->registered = c->reading = c->writing = false;
+    c->ur = u;
+    u->conns++;
+    c->uoff = c->ulen = 0;
+    c->ueof = false;
+    c->uerr = 0;
+    if (c->tls) tv_tls_impl->set_io(c->tls, c, tv_ur_tls_rd, tv_ur_tls_wr);
+}
+
+/* Back to the event queue (for a body received on a thread), if nothing is in flight or held. */
+static bool tv_ur_leave(tv_fc *c) {
+    if (c->uops || c->uoff < c->ulen || c->ueof || c->uerr) return false;
+    c->ur->conns--;
+    c->ur = NULL;
+    c->registered = c->reading = c->writing = false;
+    return true;
+}
+
+static void tv_ur_kick(tv_fc *c) {
+    if (c->ukick) return;
+    c->ukick = true;
+    c->ukick_next = tv_ur_kicks;
+    tv_ur_kicks = c;
+}
+
+/* tv_fc_interest for a connection on a ring: to read is to keep a receive in flight (and to
+ * deliver what's already in); a write is a send submitted as tv_fc_write is called. */
+static void tv_ur_interest(tv_fc *c, bool read, bool write) {
+    c->reading = read;
+    c->writing = write;
+    if (!read) return;
+    if (c->uoff < c->ulen || c->ueof || c->uerr) tv_ur_kick(c);
+    else tv_ur_post_recv(c);
+}
+
+/* tv_fc_recv on a ring: what the last receive brought, as read() would hand it out. */
+static long tv_ur_recv(tv_fc *c, char *buf, size_t n) {
+    if (c->uoff < c->ulen) {
+        size_t k = c->ulen - c->uoff;
+        if (k > n) k = n;
+        memcpy(buf, c->ubuf + c->uoff, k);
+        c->uoff += (uint32_t)k;
+        if (c->uoff == c->ulen && c->reading) tv_ur_post_recv(c);
+        return (long)k;
+    }
+    if (c->ueof) return 0;
+    if (c->uerr) { errno = c->uerr; return -3; }
+    tv_ur_post_recv(c);
+    return -1;
+}
+
+static size_t tv_fr_out_len(const tv_fr *r);
+
+/* tv_fc_write on a ring: the rest of the request in one send (a copy: the request may be gone
+ * before the send is). */
+static bool tv_ur_write(tv_fc *c) {
+    tv_fr *r = c->r;
+    if (c->usend) return true;
+    size_t hn = r->head.len, bn = r->merged ? 0 : (size_t)r->body.p->len, total = hn + bn;
+    if (r->sent >= total) { tv_ur_interest(c, true, false); return true; }
+    if (c->uerr) return false;
+    struct io_uring_sqe *s = tv_ur_sqe(c->ur);
+    if (!s) return false;
+    size_t n = total - r->sent;
+    if (c->uscap < n) {
+        tv_free(c->usbuf);
+        c->uscap = n < 1024 ? 1024 : n;
+        c->usbuf = tv_alloc(c->uscap);
+    }
+    size_t o = 0;
+    if (r->sent < hn) { memcpy(c->usbuf, r->head.data + r->sent, hn - r->sent); o = hn - r->sent; }
+    size_t bo = r->sent > hn ? r->sent - hn : 0;
+    if (bn > bo) memcpy(c->usbuf + o, r->body.p->data + bo, bn - bo);
+    c->uslen = n;
+    s->opcode = IORING_OP_SEND;
+    s->fd = c->fd;
+    s->addr = (uint64_t)(uintptr_t)c->usbuf;
+    s->len = (uint32_t)n;
+    s->msg_flags = MSG_NOSIGNAL;
+    s->user_data = (uint64_t)(uintptr_t)c | TV_UR_SEND;
+    c->usend = true;
+    c->usend_r = r;
+    c->uops++;
+    tv_ur_submit(c->ur);
+    /* the response is read as it comes */
+    tv_ur_interest(c, true, false);
+    return true;
+}
+
+static void tv_ur_complete(tv_fc *c, int op, int res) {
+    c->uops--;
+    if (op == TV_UR_RECV) {
+        c->urecv = false;
+        if (res > 0) { c->uoff = 0; c->ulen = (uint32_t)res; }
+        else if (res == 0) c->ueof = true;
+        else if (res == -EINTR || res == -EAGAIN) { if (!c->dead && c->reading) tv_ur_post_recv(c); return; }
+        else c->uerr = -res;
+        if (c->dead || !c->reading) return;
+        tv_io_quiet = false;
+        tv_fc_ready(&c->io, true, false, false);
+        return;
+    }
+    c->usend = false;
+    tv_fr *r = c->usend_r;
+    c->usend_r = NULL;
+    if (c->tls) {
+        /* TLS records: the rest, then what was queued meanwhile */
+        if (c->dead) return;
+        if (res > 0 && (size_t)res < c->uslen) {
+            memmove(c->usbuf, c->usbuf + res, c->uslen - (size_t)res);
+            c->uslen -= (size_t)res;
+            tv_ur_send_buf(c);
+        } else if (res > 0 && c->upend.len) {
+            if (c->uscap < c->upend.len) {
+                tv_free(c->usbuf);
+                c->uscap = c->upend.len;
+                c->usbuf = tv_alloc(c->uscap);
+            }
+            memcpy(c->usbuf, c->upend.data, c->upend.len);
+            c->uslen = c->upend.len;
+            c->upend.len = 0;
+            tv_ur_send_buf(c);
+        } else if (res <= 0) {
+            c->uerr = res < 0 ? -res : EPIPE;
+        }
+        if (!c->uerr) return;
+        tv_io_quiet = false;
+        tv_fc_ready(&c->io, false, false, true);
+        return;
+    }
+    if (c->dead || !r || c->r != r) return;
+    if (res > 0) {
+        r->sent += (size_t)res;
+        if (r->sent < tv_fr_out_len(r)) tv_ur_write(c);
+        return;
+    }
+    c->uerr = res < 0 ? -res : EPIPE;
+    tv_io_quiet = false;
+    tv_fc_ready(&c->io, false, false, true);
+}
+
+/* Takes the rings' completions (and delivers what earlier receives left for later). Called by
+ * the loop before it waits (timeout: how long it would; it doesn't wait if there were some, and
+ * from then on completions wake it) and after (timeout NULL). True if there was anything. */
+static bool tv_ur_poll(int *timeout) {
+    bool any = false;
+    for (int k = 0; k < tv_ur_n; k++) {
+        tv_ur *u = &tv_urs[k];
+        if (!timeout) __atomic_store_n(u->cq_flags, IORING_CQ_EVENTFD_DISABLED, __ATOMIC_RELAXED);
+        unsigned head = *u->cq_head;
+        for (;;) {
+            unsigned tail = __atomic_load_n(u->cq_tail, __ATOMIC_ACQUIRE);
+            if (head == tail) break;
+            struct io_uring_cqe *e = &u->cqes[head & *u->cq_mask];
+            uint64_t d = e->user_data;
+            int res = e->res;
+            __atomic_store_n(u->cq_head, ++head, __ATOMIC_RELEASE);
+            any = true;
+            tv_ur_complete((tv_fc *)(uintptr_t)(d & ~(uint64_t)3), (int)(d & 3), res);
+        }
+    }
+    for (tv_fc *c; (c = tv_ur_kicks);) {
+        tv_ur_kicks = c->ukick_next;
+        c->ukick = false;
+        if (c->dead || !c->ur || !c->reading) continue;
+        any = true;
+        tv_io_quiet = false;
+        tv_fc_ready(&c->io, true, false, false);
+    }
+    if (timeout && *timeout != 0) {
+        if (any) *timeout = 0;
+        else {
+            for (int k = 0; k < tv_ur_n; k++) {
+                tv_ur *u = &tv_urs[k];
+                __atomic_store_n(u->cq_flags, 0, __ATOMIC_RELAXED);
+                __atomic_thread_fence(__ATOMIC_SEQ_CST);
+                if (*u->cq_head != __atomic_load_n(u->cq_tail, __ATOMIC_ACQUIRE)) *timeout = 0;
+            }
+        }
+    }
+    return any;
+}
+
+/* A connection on a ring closing: a receive in flight ends once the socket is shut down (the
+ * connection is freed once nothing is in flight, see tv_fc_reap). */
+static void tv_ur_close(tv_fc *c) {
+    if (c->uops) shutdown(c->fd, SHUT_RDWR);
+    c->ur->conns--;
+}
+
+static void tv_ur_after_fork(void) {
+    for (int k = 0; k < tv_ur_n; k++) {
+        tv_ur *u = &tv_urs[k];
+        munmap(u->sqes, u->sqes_len);
+        if (u->cq_map != u->sq_map) munmap(u->cq_map, u->cq_len);
+        munmap(u->sq_map, u->sq_len);
+        close(u->efd);
+        close(u->fd);
+    }
+    tv_ur_n = -1;
+    tv_ur_kicks = NULL;
+    tv_fc_nopen = 0;
+    tv_loop_rings = NULL;
+}
+#endif
 
 /* ---- the socket helper
 
@@ -11550,16 +11975,32 @@ static bool tv_sk_close(tv_fc *c) {
 }
 
 static void tv_fc_reap(void) {
+#ifdef TV_URING
+    tv_fc *busy = NULL; /* (a ring's operation still in flight, or a delivery due: freed later) */
+#endif
     while (tv_fc_graveyard) {
         tv_fc *c = tv_fc_graveyard;
         tv_fc_graveyard = c->next;
+#ifdef TV_URING
+        if (c->uops || c->ukick) { c->next = busy; busy = c; continue; }
+        tv_free(c->ubuf);
+        tv_free(c->usbuf);
+        tv_sb_free(&c->upend);
+        tv_fc_nopen--;
+#endif
         tv_sb_free(&c->ctl);
         tv_fc_rbuf_free(c->in, c->in_cap);
         tv_free(c);
     }
+#ifdef TV_URING
+    tv_fc_graveyard = busy;
+#endif
 }
 
 static void tv_fc_interest(tv_fc *c, bool read, bool write) {
+#ifdef TV_URING
+    if (c->ur) { tv_ur_interest(c, read, write); return; }
+#endif
     if (c->registered && read == c->reading && write == c->writing) return;
     int q = tv_loop_queue();
     void *tag = (void *)((uintptr_t)&c->io | 1);
@@ -11583,6 +12024,9 @@ static void tv_fc_close(tv_fc *c) {
     c->dead = true;
     if (c->dialing) return; /* (the helper has it: tv_sk_ready frees it) */
     if (c->tls) { tv_tls_impl->close(c->tls, false); c->tls = NULL; }
+#ifdef TV_URING
+    if (c->ur) tv_ur_close(c);
+#endif
     if (c->fd >= 0 && !tv_sk_close(c)) close(c->fd); /* also leaves the event queue */
     c->fd = -1;
     c->next = tv_fc_graveyard;
@@ -11919,6 +12363,9 @@ static bool tv_fc_write(tv_fc *c) {
         tv_fc_interest(c, true, false);
         return true;
     }
+#ifdef TV_URING
+    if (c->ur) return tv_ur_write(c);
+#endif
     while (r->sent < hn + bn) {
         struct iovec iov[2];
         int n = 0;
@@ -12251,6 +12698,9 @@ static void tv_fc_release(tv_fc *c, bool reusable) {
 /* > 0 bytes; 0 the connection ended; -1 nothing more for now; -2 TLS wants to write; -3 failed. */
 static long tv_fc_recv(tv_fc *c, char *buf, size_t n) {
     if (c->tls) return tv_tls_impl->read(c->tls, buf, n);
+#ifdef TV_URING
+    if (c->ur) return tv_ur_recv(c, buf, n);
+#endif
     for (;;) {
         ssize_t r = read(c->fd, buf, n);
         if (r >= 0) return r;
@@ -12307,6 +12757,9 @@ static void tv_fr_send(tv_fr *r, tv_fc *c) {
     }
     r->state = TV_FR_HEAD;
     r->got_any = false;
+#ifdef TV_URING
+    if (!c->ur) tv_ur_enter(c);
+#endif
     if (!tv_fc_write(c)) {
         /* a pooled connection the server closed: try once more on a new one */
         bool retry = c->reused && !r->retried;
@@ -12446,6 +12899,9 @@ static void tv_fc_spare(tv_fc *old, tv_fr *r);
 static void tv_fr_connect(tv_fr *r, const tv_addrs *addrs) {
     tv_fc *c = tv_alloc(sizeof *c);
     memset(c, 0, sizeof *c);
+#ifdef TV_URING
+    tv_fc_nopen++;
+#endif
     c->io.ready = tv_fc_ready;
     c->fd = -1;
     c->addrs = *addrs;
@@ -12480,6 +12936,9 @@ static void tv_fc_spare(tv_fc *old, tv_fr *r) {
     if (!tv_sk_start()) return;
     tv_fc *c = tv_alloc(sizeof *c);
     memset(c, 0, sizeof *c);
+#ifdef TV_URING
+    tv_fc_nopen++;
+#endif
     c->io.ready = tv_fc_ready;
     c->fd = -1;
     c->addrs = old->addrs;
@@ -13063,7 +13522,11 @@ static void tv_fc_ready(tv_io *h, bool readable, bool writable, bool broken) {
             }
 #ifdef __linux__
             /* (a big rest, room for all of it: received on a thread, see tv_bk_start) */
-            if (r->whole && !c->tls && (size_t)r->remaining >= TV_BK_MIN && sink->cap - sink->len >= (size_t)r->remaining && tv_bk_start(r, c)) return;
+            if (r->whole && !c->tls && (size_t)r->remaining >= TV_BK_MIN && sink->cap - sink->len >= (size_t)r->remaining
+#ifdef TV_URING
+                && (!c->ur || tv_ur_leave(c))
+#endif
+                && tv_bk_start(r, c)) return;
 #endif
             long n = tv_fc_recv(c, sink->data + sink->len, want);
             if (n > 0) {
@@ -13170,6 +13633,9 @@ static void tv_fetch_after_fork(void) {
     tv_bk_jobs = tv_bk_done = NULL;
     pthread_mutex_init(&tv_dns_mu, NULL);
     pthread_cond_init(&tv_dns_cv, NULL);
+#ifdef TV_URING
+    tv_ur_after_fork();
+#endif
     tv_dns_threads = tv_dns_idle = 0;
     tv_dns_jobs = tv_dns_done = NULL;
     if (tv_dns_pipe[0] >= 0) { close(tv_dns_pipe[0]); close(tv_dns_pipe[1]); tv_dns_pipe[0] = tv_dns_pipe[1] = -1; }

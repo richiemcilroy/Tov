@@ -37,6 +37,10 @@ typedef struct tv_tls_ahead {
     int fd;
     uint8_t *buf;
     size_t off, len, cap;
+    /* the socket's bytes through these instead (fetch's io_uring rings, see tv_tls_set_io) */
+    void *io;
+    long (*rd)(void *io, void *buf, size_t n);
+    long (*wr)(void *io, const void *buf, size_t n);
 } tv_tls_ahead;
 
 struct tv_tls {
@@ -152,10 +156,16 @@ static int tv_bio_read(BIO *b, char *out, int outl) {
         return (int)n;
     }
     ssize_t r;
-    do r = recv(a->fd, tv_bio_shared, sizeof tv_bio_shared, 0); while (r < 0 && errno == EINTR);
-    if (r < 0) {
-        if (tv_bio_retry(errno)) BIO_set_retry_read(b);
-        return -1;
+    if (a->rd) {
+        r = a->rd(a->io, tv_bio_shared, sizeof tv_bio_shared);
+        if (r == -1) { BIO_set_retry_read(b); return -1; }
+        if (r < 0) return -1;
+    } else {
+        do r = recv(a->fd, tv_bio_shared, sizeof tv_bio_shared, 0); while (r < 0 && errno == EINTR);
+        if (r < 0) {
+            if (tv_bio_retry(errno)) BIO_set_retry_read(b);
+            return -1;
+        }
     }
     if (r == 0) return 0;
     size_t n = (size_t)r < (size_t)outl ? (size_t)r : (size_t)outl;
@@ -177,6 +187,11 @@ static int tv_bio_read(BIO *b, char *out, int outl) {
 static int tv_bio_write(BIO *b, const char *in, int inl) {
     tv_tls_ahead *a = BIO_get_data(b);
     BIO_clear_retry_flags(b);
+    if (a->wr) {
+        long n = a->wr(a->io, in, (size_t)inl);
+        if (n == -1) { BIO_set_retry_write(b); return -1; }
+        return n < 0 ? -1 : (int)n;
+    }
     ssize_t w;
 #ifdef MSG_NOSIGNAL
     do w = send(a->fd, in, (size_t)inl, MSG_NOSIGNAL); while (w < 0 && errno == EINTR);
@@ -526,9 +541,17 @@ static tv_tls *tv_tls_accept(int fd, void *server) {
 
 static bool tv_tls_verified(tv_tls *t) { return SSL_get_verify_result(t->ssl) == X509_V_OK; }
 
+/* The connection's bytes through rd and wr from now on (> 0 bytes, 0 the end, -1 not yet, < -1
+ * failed), not its socket: what was read ahead is taken first. */
+static void tv_tls_set_io(tv_tls *t, void *io, long (*rd)(void *io, void *buf, size_t n), long (*wr)(void *io, const void *buf, size_t n)) {
+    t->ahead.io = io;
+    t->ahead.rd = rd;
+    t->ahead.wr = wr;
+}
+
 static const tv_tls_ops tv_tls_table = {
     tv_tls_open, tv_tls_handshake, tv_tls_read, tv_tls_write, tv_tls_pending, tv_tls_why, tv_tls_close,
-    tv_tls_server, tv_tls_accept, tv_tls_verified,
+    tv_tls_server, tv_tls_accept, tv_tls_verified, tv_tls_set_io,
 };
 
 void tv_tls_install(void) {
