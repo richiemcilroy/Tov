@@ -5903,7 +5903,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                     return Val { ty: to, ..v };
                 }
                 let adapter = self.fn_adapter(from, to);
-                let fv = self.fresh("fa");
+                // (not `fa`: the arrays' free functions are `fa<type>`, see arr_free_fn)
+                let fv = self.fresh("fbox");
                 self.line(format!("tvg_fnbox *{fv} = tv_alloc(sizeof(tvg_fnbox)); {fv}->h.rc = 1; {fv}->h.drop = tvg_fnbox_drop; {fv}->f = {}; tv_env_retain({fv}->f.env);", v.code));
                 return self.tmp(to, &format!("((tv_fn){{ (void *){adapter}, (tv_env *){fv} }})"), true);
             }

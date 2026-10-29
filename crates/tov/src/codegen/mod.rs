@@ -497,7 +497,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             module_rank: Vec::new(),
             script_module: None,
             mutated_globals: FxSet::default(),
-            counter: 0,
+            // (from 1000: a fresh `p12` or `c3` never shadows parameter `p12` or cell `c3`)
+            counter: 1000,
             errors: Vec::new(),
             internal: Vec::new(),
             helpers_after: Vec::new(),
