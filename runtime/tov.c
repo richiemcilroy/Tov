@@ -635,9 +635,15 @@ void tv_f64_index_trap(double d, const char *loc) {
 
 int32_t tv_f64_to_i32_slow(double d) {
     if (!isfinite(d)) return 0;
-    double m = fmod(trunc(d), 4294967296.0);
-    if (m < 0) m += 4294967296.0;
-    return (int32_t)(uint32_t)m;
+    double t = tv_trunc(d);
+    if (__builtin_fabs(t) < 9223372036854775808.0) return (int32_t)(uint32_t)(uint64_t)(int64_t)t;
+    /* (2^63 and up: the mantissa shifted by the exponent, of which only the low 32 bits count;
+     * from 2^84 they're all zero. Without fmod, which would load libm.) */
+    uint64_t bits;
+    memcpy(&bits, &t, sizeof bits);
+    int shift = (int)((bits >> 52) & 0x7ff) - 1075;
+    uint32_t low = shift >= 32 ? 0 : (uint32_t)((((bits & ((UINT64_C(1) << 52) - 1)) | (UINT64_C(1) << 52))) << shift);
+    return (int32_t)(t < 0 ? 0u - low : low);
 }
 
 /* ================================================================== strings */
@@ -1327,7 +1333,7 @@ static size_t tv_fmt_number(char *buf, double v, bool is_f32) {
     static const double p10[7] = {1, 10, 100, 1000, 10000, 100000, 1000000};
     double t6 = v * 1e6;
     /* (v * 10^6 a whole number but for its rounding: else it has more decimals, past this path) */
-    if (!is_f32 && v < 1e9 && v >= 1e-6 && __builtin_fabs(t6 - __builtin_round(t6)) <= t6 * 1e-15) {
+    if (!is_f32 && v < 1e9 && v >= 1e-6 && __builtin_fabs(t6 - (double)(int64_t)(t6 + 0.5)) <= t6 * 1e-15) {
         for (int j = 1; j <= 6; j++) {
             double t = v * p10[j];
             if (t >= 1e15) break;
@@ -1413,7 +1419,7 @@ tv_str tv_f64_to_radix(double v, tv_int radix, const char *loc) {
     int icur = SIZE / 2, fcur = icur;
     bool neg = v < 0;
     if (neg) v = -v;
-    double integer = floor(v), fraction = v - integer;
+    double integer = tv_floor(v), fraction = v - integer;
     /* half the distance to the next double: digits below it don't change the value */
     double delta = 0.5 * (nextafter(v, INFINITY) - v);
     if (delta < nextafter(0.0, 1.0)) delta = nextafter(0.0, 1.0);
@@ -6513,7 +6519,7 @@ static bool tv_group_array_elements(const tv_pieces *out, tv_pieces *res, bool n
         ((double)total / (double)actual_max > 5 || max_len <= 6)) {
         double average_bias = sqrt((double)actual_max - (double)total / (double)n);
         double biased_max = fmax((double)actual_max - 3 - average_bias, 1);
-        double c = floor(sqrt(2.5 * biased_max * (double)out_len) / biased_max + 0.5); /* Math.round */
+        double c = tv_floor(sqrt(2.5 * biased_max * (double)out_len) / biased_max + 0.5); /* Math.round */
         int64_t columns = (int64_t)c;
         int64_t fit = (TV_BREAK_LENGTH - tv_ictx.indent) / actual_max;
         if (fit < columns) columns = fit;
@@ -7041,7 +7047,7 @@ void tv_err_sb_line(tv_sb *sb) {
 
 double tv_math_round(double x) {
     if (!isfinite(x)) return x;
-    double r = floor(x);
+    double r = tv_floor(x);
     if (x - r >= 0.5) r += 1.0;
     return r == 0 ? copysign(0.0, x) : r; /* Math.round(-0.4) is -0 */
 }
@@ -7454,7 +7460,7 @@ static long tv_date_gmtoff(double s) {
     return off;
 }
 
-static double tv_floor_div(double a, double b) { return floor(a / b); }
+static double tv_floor_div(double a, double b) { return tv_floor(a / b); }
 
 /* getTimezoneOffset(): minutes from local time to UTC (west of UTC positive), at time t (ms). */
 /* ---- node:crypto's hashes, HMACs and random bytes for Tov code (std/crypto.tov), on the

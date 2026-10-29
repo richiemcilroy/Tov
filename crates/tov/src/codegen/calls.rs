@@ -3561,9 +3561,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
             }
             "fround" => format!("((double)(float)({}))", f64s[0]),
-            "floor" | "ceil" | "trunc" if ty == F64 => format!("{name}({})", f64s[0]),
+            "floor" | "ceil" | "trunc" if ty == F64 => format!("tv_{name}({})", f64s[0]),
             "round" if ty == F64 => format!("tv_math_round({})", f64s[0]),
-            "floor" | "ceil" | "trunc" => format!("tv_f64_to_int({name}({}), \"Math.{name}\", {loc})", f64s[0]),
+            "floor" | "ceil" | "trunc" => format!("tv_f64_to_int(tv_{name}({}), \"Math.{name}\", {loc})", f64s[0]),
             "round" => format!("tv_f64_to_int(tv_math_round({}), \"Math.round\", {loc})", f64s[0]),
             "abs" => {
                 if self.c.types.is_int(ty) {

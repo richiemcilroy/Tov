@@ -98,6 +98,28 @@ void tv_free(void *p);
 #define TV_ASSUME(x) do { if (!(x)) __builtin_unreachable(); } while (0)
 #endif
 
+/* Math.trunc, floor and ceil. Baseline x86-64 has no instruction for them (SSE4.1's roundsd),
+ * so the C compiler calls libm's, and loading libm is ~300 KB of a small program's memory:
+ * there a whole double (|x| below 2^52) goes through int64 and back, and larger ones, infinities
+ * and NaN are whole already. */
+#if defined(__x86_64__) && !defined(__SSE4_1__)
+static inline double tv_trunc(double x) {
+    return __builtin_fabs(x) < 4503599627370496.0 ? __builtin_copysign((double)(int64_t)x, x) : x;
+}
+static inline double tv_floor(double x) {
+    double t = tv_trunc(x);
+    return t > x ? t - 1.0 : t;
+}
+static inline double tv_ceil(double x) {
+    double t = tv_trunc(x);
+    return t < x ? t + 1.0 : t;
+}
+#else
+#define tv_trunc __builtin_trunc
+#define tv_floor __builtin_floor
+#define tv_ceil __builtin_ceil
+#endif
+
 typedef struct tv_sb {
     char *data;
     size_t len, cap;
