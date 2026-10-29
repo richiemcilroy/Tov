@@ -13355,9 +13355,12 @@ static void tv_fr_complete(tv_fr *r) {
    it's done (tv_bk_finish, on the loop). Plain HTTP: a TLS connection's state stays on the
    loop. On Linux: 8 downloads of 8 MB at once, 0.7k/s to 1.5k/s (Bun 1.1k); macOS's loopback
    copies cheaply enough that the hand-off costs more than it saves (one download, 92 ms per
-   100 to 130). */
+   100 to 130). Two threads, the rest queued: more copy no faster, each out of memory the
+   others just pushed from cache (8 at once on 8 x86 cores: 0.15 s and 0.57 s of CPU per 200
+   downloads; 2: 0.14 s and 0.27; Bun 0.38 s and 0.57). */
 #define TV_BK_MIN ((size_t)1 << 20)
-#define TV_BK_THREADS 8
+#define TV_BK_THREADS 2
+#define TV_BK_WAIT ((uint64_t)20 * 1000000)
 typedef struct tv_bk {
     tv_int id;            /* the request's; 0 once it was aborted (or freed) meanwhile */
     tv_fc *c;
@@ -13368,11 +13371,12 @@ typedef struct tv_bk {
     int err;
     bool check, bad;      /* checked as UTF-8 as it arrives (see tv_fr_check_utf8): from pos */
     size_t pos;
+    uint64_t queued;      /* when it was queued (tv_mono_ns) */
     struct tv_bk *next;
 } tv_bk;
 static pthread_mutex_t tv_bk_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t tv_bk_cv = PTHREAD_COND_INITIALIZER;
-static tv_bk *tv_bk_jobs, *tv_bk_done;
+static tv_bk *tv_bk_jobs, *tv_bk_done;  /* (jobs: newest first) */
 static int tv_bk_threads, tv_bk_idle;
 static int tv_bk_active;   /* (the loop's count) jobs started and not yet finished */
 
@@ -13386,8 +13390,15 @@ static void *tv_bk_run(void *arg) {
             pthread_cond_wait(&tv_bk_cv, &tv_bk_mu);
             tv_bk_idle--;
         }
-        tv_bk *j = tv_bk_jobs;
-        tv_bk_jobs = j->next;
+        /* (the newest: its bytes just came, still in cache, where a waiting job's have sat in
+         * the socket's buffer since (8 at once on 2 threads: 0.14 s and 0.27 s of CPU per 200,
+         * oldest first 0.19 s and 0.38); the oldest once it's waited TV_BK_WAIT, so none waits
+         * for ever while new ones come) */
+        tv_bk **pick = &tv_bk_jobs, **last = &tv_bk_jobs;
+        while ((*last)->next) last = &(*last)->next;
+        if (last != pick && tv_mono_ns() - (*last)->queued > TV_BK_WAIT) pick = last;
+        tv_bk *j = *pick;
+        *pick = j->next;
         pthread_mutex_unlock(&tv_bk_mu);
         /* (blocking for the job, the kernel filling the buffer in one call; non-blocking again
          * for the loop, after) */
@@ -13480,6 +13491,7 @@ static bool tv_bk_start(tv_fr *r, tv_fc *c) {
     /* (the loop waits for it, even past an abort: it hands back the connection and buffer) */
     tv_io_refs++;
     tv_bk_active++;
+    j->queued = tv_mono_ns();
     j->next = tv_bk_jobs;
     tv_bk_jobs = j;
     pthread_cond_signal(&tv_bk_cv);
