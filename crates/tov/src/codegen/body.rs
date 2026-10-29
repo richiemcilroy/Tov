@@ -6713,10 +6713,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let d = self.default_value(ty);
                     self.line(format!("{res} = {d};"));
                 } else {
-                    let kv = self.project(Val { code: x.clone(), ty: lty, owned: true }, keep);
+                    // (x itself becomes the result when the narrowing leaves it as it is; a view of
+                    // it, a union's payload, is retained and x released)
+                    let kv = self.project(Val { code: x.clone(), ty: lty, owned: false }, keep);
                     let kv = self.coerce(kv, ty);
-                    let kc = self.consume(kv);
-                    self.line(format!("{res} = {kc};"));
+                    if !kv.owned && (kv.code == x || kv.code == format!("({x})")) {
+                        self.line(format!("{res} = {x};"));
+                    } else {
+                        let kc = self.consume(kv);
+                        self.line(format!("{res} = {kc};"));
+                        let rel = self.release_code(lty, &x);
+                        if !rel.is_empty() {
+                            self.line(format!("{rel};"));
+                        }
+                    }
                 }
                 self.close("} else {");
                 self.b().indent += 1;
@@ -9745,6 +9755,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.line(format!("tv_str_append_slice(&({lv}), {}, {}, {a1}, {has_end});", sv.code, a0.code));
                     return cur;
                 }
+                // `x ??= v`: v is evaluated only when x is nullish
+                if bop == BinOp::Nullish {
+                    let present = self.truthy(cur.clone());
+                    self.open(&format!("if (!{present}) {{"));
+                    self.push_temps();
+                    let rhs = self.expr(value);
+                    let v = self.coerce(rhs, p.ty);
+                    let code = self.consume(v);
+                    let r = self.release_code(p.ty, &lv);
+                    self.line(format!("{r}; {lv} = {code};"));
+                    self.pop_temps();
+                    self.close("}");
+                    return cur;
+                }
                 let rhs = self.expr(value);
                 if p.ty == BIGINT {
                     // in place: the variable's buffer is reused when it's the only reference
@@ -9761,18 +9785,6 @@ impl<'c, 'a> Gen<'c, 'a> {
                     return cur;
                 }
                 let result = match bop {
-                    BinOp::Nullish => {
-                        let present = self.truthy(cur.clone());
-                        self.open(&format!("if (!{present}) {{"));
-                        self.push_temps();
-                        let v = self.coerce(rhs, p.ty);
-                        let code = self.consume(v);
-                        let r = self.release_code(p.ty, &lv);
-                        self.line(format!("{r}; {lv} = {code};"));
-                        self.pop_temps();
-                        self.close("}");
-                        return cur;
-                    }
                     BinOp::Add if p.ty == STR => {
                         // (in place when the variable holds the only reference: a loop of `+=`
                         // is linear)
