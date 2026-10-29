@@ -523,9 +523,9 @@ mod tests {
 
     #[test]
     fn for_headers_braces_and_returns() {
-        let (p, b, f) = lowered("for (tv_int i4 = 0; i4 < n; i4++) { E7 ev = { {-1, NULL}, &(i4) }; f(&ev); }\nreturn i4;\nreturn;\n", &[]);
+        let (p, b, f) = lowered("for (tv_int i4 = 0; i4 < n; i4++) { E7 ev = { {-1, 0, NULL}, &(i4) }; f(&ev); }\nreturn i4;\nreturn;\n", &[]);
         assert_eq!(p, "");
-        assert_eq!(b, "for (F->i4 = 0; F->i4 < n; F->i4++) { F->ev = (E7){ {-1, NULL}, &(F->i4) }; f(&F->ev); }\n{ F->ret = F->i4; return true; }\nreturn true;\n");
+        assert_eq!(b, "for (F->i4 = 0; F->i4 < n; F->i4++) { F->ev = (E7){ {-1, 0, NULL}, &(F->i4) }; f(&F->ev); }\n{ F->ret = F->i4; return true; }\nreturn true;\n");
         assert_eq!(f, vec![("tv_int".into(), "i4".into()), ("E7".into(), "ev".into())]);
     }
 

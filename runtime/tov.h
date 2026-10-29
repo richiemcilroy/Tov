@@ -1015,7 +1015,10 @@ static inline double tv_random(void) {
 /* ------------------------------------------------------------------ closures and boxes */
 
 typedef struct tv_env {
-    int64_t rc;
+    int32_t rc;
+    /* the block's size when it's from the small-object free lists (generated code's), which it
+     * goes back to: 0 for malloc's */
+    uint32_t size;
     void (*drop)(struct tv_env *env);     /* releases captured values; runtime frees env after */
 } tv_env;
 

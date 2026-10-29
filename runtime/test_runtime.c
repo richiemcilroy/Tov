@@ -2345,6 +2345,7 @@ static void test_math_misc(void) {
     /* closure environments */
     tv_env *e = tv_alloc(sizeof(tv_env));
     e->rc = 1;
+    e->size = 0;
     e->drop = env_drop;
     tv_env_retain(e);
     tv_env_release(e);
@@ -2353,12 +2354,13 @@ static void test_math_misc(void) {
     CHECK(dropped);
     tv_env_retain(NULL);
     tv_env_release(NULL);
-    static tv_env immortal = {-1, env_drop};
+    static tv_env immortal = {-1, 0, env_drop};
     dropped = false;
     tv_env_release(&immortal);
     CHECK(!dropped);
     tv_env *e2 = tv_alloc(sizeof(tv_env));
     e2->rc = 1;
+    e2->size = 0;
     e2->drop = NULL;
     tv_env_release(e2);
 
@@ -2494,6 +2496,7 @@ static void cb_log(tv_env *env) { alog_push((const char *)((void **)(env + 1))[0
 static tv_fn log_fn(const char *word) {
     struct { tv_env h; const char *w; } *e = tv_alloc(sizeof *e);
     e->h.rc = 1;
+    e->h.size = 0;
     e->h.drop = NULL;
     e->w = word;
     return (tv_fn){(void *)cb_log, &e->h};

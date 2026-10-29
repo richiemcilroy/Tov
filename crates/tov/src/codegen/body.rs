@@ -6002,7 +6002,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let adapter = self.fn_adapter(from, to);
                 // (not `fa`: the arrays' free functions are `fa<type>`, see arr_free_fn)
                 let fv = self.fresh("fbox");
-                self.line(format!("tvg_fnbox *{fv} = tv_alloc(sizeof(tvg_fnbox)); {fv}->h.rc = 1; {fv}->h.drop = tvg_fnbox_drop; {fv}->f = {}; tv_env_retain({fv}->f.env);", v.code));
+                self.line(format!("tvg_fnbox *{fv} = tvg_alloc_small(sizeof(tvg_fnbox)); {fv}->h.rc = 1; {fv}->h.size = TVG_ENV_SIZE(sizeof(tvg_fnbox)); {fv}->h.drop = tvg_fnbox_drop; {fv}->f = {}; tv_env_retain({fv}->f.env);", v.code));
                 return self.tmp(to, &format!("((tv_fn){{ (void *){adapter}, (tv_env *){fv} }})"), true);
             }
             _ => {}
@@ -10032,7 +10032,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     format!("&({access})")
                 })
                 .collect();
-            self.line(format!("{} {ev} = {{ {{-1, NULL}}, {} }};", info.env_type, ptrs.join(", ")));
+            self.line(format!("{} {ev} = {{ {{-1, 0, NULL}}, {} }};", info.env_type, ptrs.join(", ")));
             return Val::plain(format!("((tv_fn){{ (void *){}, (tv_env *)&{ev} }})", info.cname), fty);
         }
         let info = self.emit_arrow(e, fty, false);
@@ -10041,7 +10041,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         let env = self.fresh("env");
         let et = info.env_type.clone();
-        self.line(format!("{et} *{env} = tv_alloc(sizeof({et})); {env}->h.rc = 1; {env}->h.drop = drop_{et};"));
+        self.line(format!("{et} *{env} = tvg_alloc_small(sizeof({et})); {env}->h.rc = 1; {env}->h.size = TVG_ENV_SIZE(sizeof({et})); {env}->h.drop = drop_{et};"));
         for (j, (key, ty, boxed)) in info.captures.iter().enumerate() {
             let local = self.b().locals.get(key).cloned();
             let Some(local) = local else { continue };
@@ -10233,7 +10233,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             "NULL".to_string()
         } else {
             let env = self.fresh("env");
-            self.line(format!("{env_type} *{env} = tv_alloc(sizeof({env_type})); {env}->h.rc = {}; {env}->h.drop = drop_{env_type};", members.len()));
+            self.line(format!("{env_type} *{env} = tvg_alloc_small(sizeof({env_type})); {env}->h.rc = {}; {env}->h.size = TVG_ENV_SIZE(sizeof({env_type})); {env}->h.drop = drop_{env_type};", members.len()));
             for (j, (key, ty, boxed)) in captures.iter().enumerate() {
                 let Some(local) = self.b().locals.get(key).cloned() else { continue };
                 if *boxed {

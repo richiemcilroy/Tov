@@ -624,7 +624,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                         format!("&({access})")
                     })
                     .collect();
-                self.line(format!("{} {ev} = {{ {{-1, NULL}}, {} }};", info.env_type, ptrs.join(", ")));
+                self.line(format!("{} {ev} = {{ {{-1, 0, NULL}}, {} }};", info.env_type, ptrs.join(", ")));
                 format!("(tv_env *)&{ev}")
             };
             return Callback { direct: Some((info.cname, env)), value: String::new(), params, ret, throws };

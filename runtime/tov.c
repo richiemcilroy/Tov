@@ -7083,7 +7083,8 @@ __attribute__((noinline, cold)) void tv_random_init(void) {
 
 void tv_env_release_slow(tv_env *e) {
     if (e->drop) e->drop(e);
-    free(e);
+    if (e->size) tv_small_free(e, e->size);
+    else free(e);
 }
 
 /* ================================================================== tests */
@@ -8996,6 +8997,7 @@ static void tv_resolver_drop(tv_env *e) { tv_promise_release(((tv_resolver_env *
 tv_env *tv_promise_resolver(tv_promise *p) {
     tv_resolver_env *e = tv_alloc(sizeof *e);
     e->h.rc = 1;
+    e->h.size = 0;
     e->h.drop = tv_resolver_drop;
     e->p = p;
     tv_promise_retain(p);

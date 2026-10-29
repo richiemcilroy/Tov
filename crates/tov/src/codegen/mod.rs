@@ -2760,6 +2760,13 @@ static inline bool tvg_fn_eq(tv_fn a, tv_fn b) { a = tvg_fn_unwrap(a); b = tvg_f
 static inline void tvg_obj_release(void *p) { if (p && --((tvg_obj *)p)->rc == 0) tvg_obj_drop(p); }
 static inline void tvg_weak_retain(void *p) { if (p) TVG_WEAK(p)++; }
 static inline void tvg_weak_release(void *p) { if (p && --TVG_WEAK(p) == 0 && ((tvg_obj *)p)->rc <= 0) tvg_obj_free(p); }
+/* A closure environment's `size` (see tv_env): its block's, when tvg_alloc_small took it from the
+ * small-object free lists; 0 when from malloc (too big, or plain allocation) */
+#ifdef TVG_PLAIN_ALLOC
+#define TVG_ENV_SIZE(n) 0u
+#else
+#define TVG_ENV_SIZE(n) ((((n) + 7) >> 3) < TVG_CLASSES ? (uint32_t)(n) : 0u)
+#endif
 static inline void tvg_free_small(void *p, size_t size) {
 #ifdef TVG_PLAIN_ALLOC
     tv_free(p); return;
