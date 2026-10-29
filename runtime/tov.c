@@ -390,7 +390,6 @@ static inline uint64_t tv_r32(const unsigned char *p) { uint32_t v; memcpy(&v, p
 static uint64_t tv_hash_bytes(const void *data, size_t len) {
     const uint64_t s0 = 0xa0761d6478bd642fULL, s1 = 0xe7037ed1a0b428dbULL, s2 = 0x8ebc6af09c88c6e3ULL;
     const unsigned char *p = (const unsigned char *)data;
-    uint64_t seed = 0x243f6a8885a308d3ULL ^ tv_mum(len ^ s0, s1);
     uint64_t a, b;
     if (len <= 16) {
         if (len >= 8) {
@@ -405,16 +404,19 @@ static uint64_t tv_hash_bytes(const void *data, size_t len) {
         } else {
             a = b = 0;
         }
-    } else {
-        size_t n = len;
-        while (n > 16) {
-            seed = tv_mum(tv_r64(p) ^ s1, tv_r64(p + 8) ^ seed);
-            p += 16;
-            n -= 16;
-        }
-        a = tv_r64(p + n - 16);
-        b = tv_r64(p + n - 8);
+        /* (a short key, a map's usual one: one wide multiply rather than three in a row, the
+         * length folded in by a plain one alongside) */
+        return tv_mum(a ^ s2, b ^ s1 ^ (len * s0)) ^ len;
     }
+    uint64_t seed = 0x243f6a8885a308d3ULL ^ tv_mum(len ^ s0, s1);
+    size_t n = len;
+    while (n > 16) {
+        seed = tv_mum(tv_r64(p) ^ s1, tv_r64(p + 8) ^ seed);
+        p += 16;
+        n -= 16;
+    }
+    a = tv_r64(p + n - 16);
+    b = tv_r64(p + n - 8);
     return tv_mum(s1 ^ len, tv_mum(a ^ s2, b ^ seed));
 }
 
