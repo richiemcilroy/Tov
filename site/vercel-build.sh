@@ -9,9 +9,16 @@ root=$(cd "$here/.." && pwd)
 if ! command -v cc > /dev/null 2>&1; then
     dnf install -y -q gcc > /dev/null
 fi
-if ! command -v cargo > /dev/null 2>&1; then
-    curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal > /dev/null
-    . "$HOME/.cargo/env"
+# (the compiler needs Rust 1.95 or newer, and the build image's may be older or missing)
+rust_minor=$(rustc --version 2>/dev/null | sed -n 's/^rustc 1\.\([0-9]*\).*/\1/p')
+if [ -z "$rust_minor" ] || [ "$rust_minor" -lt 95 ]; then
+    if command -v rustup > /dev/null 2>&1; then
+        rustup toolchain install stable -q --profile minimal > /dev/null
+        rustup default stable > /dev/null
+    else
+        curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal > /dev/null
+    fi
+    if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi
 fi
 
 # (the site makes no HTTPS requests: the TLS libraries the compiler would carry aren't needed)
