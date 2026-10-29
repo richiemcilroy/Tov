@@ -1,0 +1,3 @@
+helper said: {"args":["a","b c"],"argv1":"its own path"}
+status: 3
+main here: false

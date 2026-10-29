@@ -889,6 +889,11 @@ impl<'c, 'a> Gen<'c, 'a> {
         } else {
             main_body = main_body.replace(ASYNC_RUN, "");
         }
+        // (started as Node.js runs a file, `spawn(process.execPath, [file])`, with the path of a
+        // script the bundle carries: that script and the event loop instead of `main`)
+        if self.js.used {
+            let _ = write!(init, "    if (tv_js_script_main(tvg_argc, tvg_argv)) {{\n{ASYNC_RUN}        return 0;\n    }}\n");
+        }
         // An npm program's end goes through Node.js's: 'exit' listeners, and process.exitCode
         // (runtime/node.c's tv_node_exit_code), with the status `main` left as the default.
         let (body_name, exit_hook) = if self.js.used {

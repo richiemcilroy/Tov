@@ -135,7 +135,8 @@ pub fn to_commonjs(src: &str, ts: bool, jsx: Option<&str>) -> Result<(String, Ve
         let _ = write!(out, "__tov_star(__tov_x, {}); ", ns(s));
     }
     if !m.import_meta.is_empty() {
-        out.push_str("var __tov_meta = { url: \"file://\" + __tov_f, filename: __tov_f, dirname: __tov_d, resolve: function (s) { return \"file://\" + __tov_r.resolve(s); } }; ");
+        // (`main`: the module is the script the program was started to run, see bundle.rs's __tov_script)
+        out.push_str("var __tov_meta = { url: \"file://\" + __tov_f, filename: __tov_f, dirname: __tov_d, main: __tov_f === globalThis.__tov_script_file, resolve: function (s) { return \"file://\" + __tov_r.resolve(s); } }; ");
     }
     if !m.dynamic_imports.is_empty() {
         out.push_str("var __tov_import = function (s) { return new Promise(function (ok) { ok(__tov_ns(__tov_r(s))); }); }; ");

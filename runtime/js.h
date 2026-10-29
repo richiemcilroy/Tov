@@ -47,6 +47,10 @@ JSContextRef tv_js_start(void);
 extern JSGlobalContextRef tv_js_ctx;
 void tv_js_exit_work(void);   /* exit()'s handlers' work, for a program that leaves with _exit */
 static inline JSContextRef tv_js(void) { return tv_js_ctx ? tv_js_ctx : tv_js_start(); }
+/* Started as Node.js runs a file (`spawn(process.execPath, [file, ...])`): runs argv[1] if it's
+ * a script the bundle carries, and says so (the program then runs the event loop instead of
+ * `main`). Programs not started with a script's path don't start the engine for this. */
+bool tv_js_script_main(int argc, char **argv);
 
 /* Filled by runtime/node.c: the natives Node.js's built-ins run on (process, timers, fs, ...),
  * as functions on `native` (globalThis.__tov_native). */

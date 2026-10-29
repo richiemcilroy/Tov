@@ -52,6 +52,7 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
     let mut entry_ids = Vec::new();
     let mut native = false;
     let mut addons: Vec<PathBuf> = Vec::new();
+    let mut scripts: Vec<(String, usize)> = Vec::new();
     let mut pack = Pack::load(root, specs);
     // (transforms go into the cache from one thread: files written from many at once into its
     // one directory wait on each other, more than the transforms take)
@@ -172,6 +173,18 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
                     for (prefix, suffix) in &t.patterns {
                         reqs.extend(expand_pattern(&dir, prefix, suffix));
                     }
+                    // scripts it runs by path (see script_refs): bundled, and run when the program
+                    // is started with one's path, as Node.js runs a file
+                    for spec in script_refs(&t.body) {
+                        match resolver.resolve(&dir, &spec) {
+                            Ok(Target::File(file)) => {
+                                let to = add(&mut modules, &mut index, &mut queue, Target::File(file.clone()));
+                                scripts.push((display(&file, root), to));
+                            }
+                            Ok(_) => {}
+                            Err(e) => warnings.push(format!("{name}: {e}")),
+                        }
+                    }
                     (name, t.body, reqs, dir)
                 }
             };
@@ -262,6 +275,10 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
     js.push_str("globalThis.__tov_npm = {");
     for (spec, id) in specs.iter().zip(&entry_ids) {
         let _ = write!(js, "{}:{},", js_string(spec), id);
+    }
+    js.push_str("};\nvar __tov_script_ids = {");
+    for (file, id) in &scripts {
+        let _ = write!(js, "{}:{},", js_string(file), id);
     }
     js.push_str("};\n");
     if let Some(id) = globals_id {
@@ -850,8 +867,44 @@ Object.defineProperty(globalThis, "__tov_modules", { value: {
   // require.resolve of a file on disk where the program runs (not bundled); undefined if none
   resolveFrom: function (spec, from) { return __tov_disk_resolve(spec, from); } } });
 globalThis.__tov_npm = function (spec) { return __tov_load(entries[spec]); };
+// The program started as Node.js runs a file (`spawn(process.execPath, [file])`): runs `file` if
+// it's a script the bundle carries (see script_refs); false if it isn't one
+globalThis.__tov_script = function (file) {
+  var id = __tov_script_ids[file];
+  if (id === undefined) return false;
+  // (its process.argv as Node.js's for a file: [execPath, the script, ...its arguments], not a
+  // program's [execPath, the program, ...])
+  if (typeof process === "object" && process.argv && process.argv.length > 2) process.argv.splice(1, 1);
+  Object.defineProperty(globalThis, "__tov_script_file", { value: file });
+  __tov_load(id);
+  return true;
+};
 })();
 "#;
+
+/// The scripts a module runs by path, `new URL("./x.ts", import.meta.url)` (in its transformed
+/// code `import.meta` is `__tov_meta`), as Vite and Bun find workers: relative specifiers of
+/// JavaScript or TypeScript files.
+fn script_refs(body: &str) -> Vec<String> {
+    const EXTS: [&str; 8] = [".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".jsx", ".tsx"];
+    let mut out = Vec::new();
+    let mut rest = body;
+    while let Some(at) = rest.find("new URL(") {
+        rest = &rest[at + 8..];
+        let s = rest.trim_start();
+        let Some(q) = s.chars().next().filter(|c| matches!(c, '"' | '\'' | '`')) else { continue };
+        let Some(end) = s[1..].find(q) else { continue };
+        let spec = &s[1..1 + end];
+        let tail = s[2 + end..].trim_start();
+        let Some(tail) = tail.strip_prefix(',') else { continue };
+        let Some(tail) = tail.trim_start().strip_prefix("__tov_meta.url") else { continue };
+        let relative = spec.starts_with("./") || spec.starts_with("../");
+        if tail.trim_start().starts_with(')') && relative && !spec.contains(['\\', '$']) && EXTS.iter().any(|e| spec.ends_with(e)) && !out.iter().any(|o| o == spec) {
+            out.push(spec.to_string());
+        }
+    }
+    out
+}
 
 /// What transforming a module's text gave: its code as a function body (converted to CommonJS,
 /// TypeScript and JSX stripped, minified), its static requires, and its required patterns

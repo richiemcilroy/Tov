@@ -1,0 +1,5 @@
+import run from "node-self-spawn"
+
+function main() {
+  try run()
+}

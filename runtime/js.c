@@ -1114,6 +1114,37 @@ JSContextRef tv_js_start(void) {
     return ctx;
 }
 
+bool tv_js_script_main(int argc, char **argv) {
+    if (argc < 2) return false;
+    static const char *const exts[] = {".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".jsx", ".tsx"};
+    const char *file = argv[1];
+    size_t n = strlen(file);
+    bool script = false;
+    for (size_t i = 0; i < sizeof exts / sizeof exts[0]; i++) {
+        size_t e = strlen(exts[i]);
+        if (n > e && memcmp(file + n - e, exts[i], e) == 0) script = true;
+    }
+    if (!script) return false;
+    /* (by its absolute path, the bundle's name for it; a relative one from the working directory) */
+    char abs[4096];
+    if (file[0] != '/') {
+        if (!realpath(file, abs)) return false;
+        file = abs;
+    }
+    JSContextRef ctx = tv_js();
+    JSStringRef k = JSStringCreateWithUTF8CString("__tov_script");
+    JSValueRef fn = JSObjectGetProperty(ctx, JSContextGetGlobalObject(ctx), k, NULL);
+    JSStringRelease(k);
+    if (!JSValueIsObject(ctx, fn)) return false;
+    JSStringRef s = JSStringCreateWithUTF8CString(file);
+    JSValueRef arg = JSValueMakeString(ctx, s);
+    JSStringRelease(s);
+    JSValueRef exc = NULL;
+    JSValueRef ran = JSObjectCallAsFunction(ctx, (JSObjectRef)fn, NULL, 1, &arg, &exc);
+    if (exc) tv_js_fatal("uncaught ", exc);
+    return JSValueToBoolean(ctx, ran);
+}
+
 void tv_js_drain(void) {
     if (tv_js_ctx) JSObjectCallAsFunction(tv_js_ctx, tv_js_noop, NULL, 0, NULL, NULL);
 }
