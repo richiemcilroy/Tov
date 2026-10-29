@@ -1030,8 +1030,17 @@ JSContextRef tv_js_start(void) {
         {"JSC_numberOfDFGCompilerThreads", "1"},
         {"JSC_numberOfFTLCompilerThreads", "2"},
         {"JSC_heapGrowthMaxIncrease", "3"},
+#ifdef __linux__
+        /* (Linux: a collection's helper threads cost more to wake than they save on a young
+         * generation this small, and each collection costs more, so it's a little bigger: the
+         * zod loop 119 ms -> 105 (Bun 104), npm service memory 46.3 -> 48.4 MB (Bun 48.8),
+         * Cap's media server unchanged. macOS is slower with either.) */
+        {"JSC_numberOfGCMarkers", "1"},
+        {"JSC_smallHeapSize", "6291456"},
+#else
         {"JSC_numberOfGCMarkers", "2"},
         {"JSC_smallHeapSize", "4194304"},
+#endif
     };
     enum { noptions = sizeof options / sizeof options[0] };
     bool set[noptions];
