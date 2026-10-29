@@ -475,7 +475,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let order = jsc.as_ref().and_then(|j| j.order.as_ref()).filter(|_| lld);
     let gnu_order = jsc.as_ref().and_then(|j| j.order.as_ref()).filter(|_| !lld && gnu_ld_orders()).and_then(|(p, h)| gnu_order_script(p, h).map(|s| (s, h.clone())));
     let order_key = order.map(|o| o.1.as_str()).or(gnu_order.as_ref().map(|o| o.1.as_str())).unwrap_or_default();
-    let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), LINK_FLAGS.as_bytes(), if lld { b"lld" } else { b"ld" }, tls_key.as_bytes(), js_key.as_bytes(), addon_key.as_bytes(), re_key.as_bytes(), order_key.as_bytes()]);
+    let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), PROGRAM_FLAGS_CLANG.join(" ").as_bytes(), PROGRAM_FLAGS_GCC.join(" ").as_bytes(), LINK_FLAGS.as_bytes(), if lld { b"lld" } else { b"ld" }, tls_key.as_bytes(), js_key.as_bytes(), addon_key.as_bytes(), re_key.as_bytes(), order_key.as_bytes()]);
     let dir = cache_dir();
     // A program with addons gets a directory of its own, the addons beside it.
     let bin_dir = if addons.is_empty() { dir.join("bin") } else { dir.join("bin").join(&key) };
@@ -542,6 +542,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         None => &c_src,
     };
     let mut program_flags = flags.clone();
+    program_flags.extend(if is_clang(&cc) { PROGRAM_FLAGS_CLANG } else { PROGRAM_FLAGS_GCC });
     let include;
     if let Some(h) = &pch {
         // (clang: the precompiled header itself, unchecked against the header it was made from,
@@ -1056,6 +1057,12 @@ fn sign_for_jit(binary: &Path, c_dir: &Path) -> Result<(), BuildError> {
 
 /// macOS: the main thread's stack size (the most arm64 allows).
 const LINK_STACK: &str = "-Wl,-stack_size,0x20000000";
+/// The program's own code (not the runtime's): its copy loops stay loops rather than calls to
+/// memmove and memcpy, which for the few elements such loops usually move cost more than the
+/// copy (x86-64 fannkuch-redux, a short rotation per permutation: 1.84 s to 1.75). The runtime's
+/// copies are big ones (map_insert, sort and strings 50-65% slower with it there too).
+const PROGRAM_FLAGS_CLANG: &[&str] = &["-mllvm", "-disable-loop-idiom-memcpy"];
+const PROGRAM_FLAGS_GCC: &[&str] = &["-fno-tree-loop-distribute-patterns"];
 /// Everything that changes how programs are linked, for the binary cache key.
 const LINK_FLAGS: &str = "dead-strip; dead-strip-dylibs; exported: _main; -x unless -g; sanitizers link without -stack_size; -Wl,-stack_size,0x20000000; Linux: --as-needed after the runtime, lld when installed, -s unless -g, -O0 with the engine";
 
