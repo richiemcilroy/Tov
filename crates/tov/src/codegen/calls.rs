@@ -536,7 +536,6 @@ impl<'c, 'a> Gen<'c, 'a> {
         if elems.iter().any(|&x| matches!(self.ast(self.cur_m()).expr(x).kind, ExprKind::Spread(_))) {
             return self.build_spread(&elems, arr_ty).code;
         }
-        let d = self.desc(elem);
         let ect = self.ctype(elem);
         let mut codes = Vec::new();
         for a in args {
@@ -547,13 +546,13 @@ impl<'c, 'a> Gen<'c, 'a> {
             self.line(format!("{ect} {n} = {code};"));
             codes.push(n);
         }
-        let arr = self.tmp(arr_ty, "tv_arr_fresh()", true);
+        // (the elements in the header's own block, as an array literal's: one allocation)
+        let arr = self.tmp(arr_ty, &format!("tv_arr_new_len(sizeof({ect}), {})", codes.len()), true);
         let w = self.fresh("w");
-        self.line(format!("{ect} *{w} = ({ect} *)tv_arr_reserve_tail(&{}, {d}, {});", arr.code, codes.len()));
+        self.line(format!("{ect} *{w} = ({ect} *)tv_arr_data({});", arr.code));
         for (i, c) in codes.iter().enumerate() {
             self.line(format!("{w}[{i}] = {c};"));
         }
-        self.line(format!("{}.p->len = {};", arr.code, codes.len()));
         arr.code
     }
 
@@ -3697,6 +3696,42 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             self.line(format!("tv_arr_push(&{}, {d}, &{n});", arr.code));
             self.close("}");
+            return arr;
+        }
+        // (one spread of an array of the same elements, `[...xs, a]`: what comes before it, then
+        // it, then one array with room for all of it, its elements copied in before what comes
+        // after is evaluated, as JavaScript's order has it)
+        let spreads: Vec<usize> = elems.iter().enumerate().filter(|(_, x)| matches!(self.ast(self.cur_m()).expr(**x).kind, ExprKind::Spread(_))).map(|(i, _)| i).collect();
+        if let [at] = spreads[..]
+            && let ExprKind::Spread(inner) = self.ast(self.cur_m()).expr(elems[at]).kind
+            && let it = self.ty(inner)
+            && matches!(self.tget(it), Ty::Array(e) if e == et)
+        {
+            let mut before = Vec::new();
+            for &x in &elems[..at] {
+                let v = self.expr(x);
+                let v = self.coerce(v, et);
+                let code = self.consume(v);
+                let n = self.fresh("e");
+                self.line(format!("{ect} {n} = {code};"));
+                before.push(n);
+            }
+            // (an array is its own spread: the same value, of the type checked above)
+            let src = self.spread_array(inner);
+            let rest = elems.len() - 1;
+            let arr = self.tmp(ty, &format!("tv_arr_with_capacity({d}, tv_arr_len({}) + {rest})", src.code), true);
+            for n in &before {
+                self.line(format!("tv_arr_push(&{}, {d}, &{n});", arr.code));
+            }
+            self.line(format!("tv_arr_extend(&{}, {d}, {});", arr.code, src.code));
+            for &x in &elems[at + 1..] {
+                let v = self.expr(x);
+                let v = self.coerce(v, et);
+                let code = self.consume(v);
+                let n = self.fresh("e");
+                self.line(format!("{ect} {n} = {code};"));
+                self.line(format!("tv_arr_push(&{}, {d}, &{n});", arr.code));
+            }
             return arr;
         }
         let arr = self.tmp(ty, "tv_arr_fresh()", true);
