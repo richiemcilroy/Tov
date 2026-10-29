@@ -8536,6 +8536,13 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                     exprs.extend(xs.iter().copied());
                 }
+                // (an array literal, `m[k] ?? []`: no spread, which could run an iterator)
+                ExprKind::Array(xs) => {
+                    if xs.iter().any(|&x| matches!(ast.expr(x).kind, ExprKind::Spread(_))) {
+                        return None;
+                    }
+                    exprs.extend(xs.iter().copied());
+                }
                 // (the map itself only at the loop's key: a value changed in place)
                 ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => {
                     match &ast.expr(*t).kind {
