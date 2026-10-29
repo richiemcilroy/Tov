@@ -779,6 +779,30 @@ fn jsc_flags() -> Result<JscFlags, BuildError> {
 /// APFS the copy shares the base's blocks). The binary is page-aligned, then the blob, a NUL,
 /// the blob's offset and length (u64s, little-endian) and "TOV_BLOB". Older programs made from
 /// the same base are removed (each would otherwise keep a copy of the engine).
+/// Copies `from` to `to` (a new file): on Linux as a clone of its blocks where the file system
+/// can (btrfs, XFS), which a binary with the engine and ICU in it (~70 MB) otherwise spends ~35
+/// ms writing; elsewhere `std::fs::copy` (macOS clones on APFS itself).
+fn copy_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+        unsafe extern "C" {
+            fn ioctl(fd: i32, request: u64, ...) -> i32;
+        }
+        const FICLONE: u64 = 0x4004_9409;
+        let src = std::fs::File::open(from)?;
+        let mode = src.metadata()?.permissions().mode();
+        let dst = std::fs::File::create(to)?;
+        // SAFETY: both descriptors are open files; FICLONE takes the source's descriptor
+        if unsafe { ioctl(dst.as_raw_fd(), FICLONE, src.as_raw_fd()) } == 0 {
+            return dst.set_permissions(std::fs::Permissions::from_mode(mode));
+        }
+        drop(dst);
+    }
+    std::fs::copy(from, to).map(|_| ())
+}
+
 fn with_blob(base: &Path, blob: &Path) -> Result<PathBuf, BuildError> {
     let fail = |e: std::io::Error| BuildError::Message(format!("can't append the program's JavaScript: {e}"));
     let name = base.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -787,7 +811,7 @@ fn with_blob(base: &Path, blob: &Path) -> Result<PathBuf, BuildError> {
     if !cached(&out) {
         use std::io::Write;
         let tmp = out.with_file_name(format!("{name}-{blob_name}.tmp{}", tmp_tag()));
-        std::fs::copy(base, &tmp).map_err(fail)?;
+        copy_file(base, &tmp).map_err(fail)?;
         let js = std::fs::read(blob).map_err(fail)?;
         let mut f = std::fs::OpenOptions::new().append(true).open(&tmp).map_err(fail)?;
         let len = f.metadata().map_err(fail)?.len();
@@ -838,7 +862,7 @@ pub fn install(built: &Built, dest: &Path) -> std::io::Result<()> {
     for a in &built.addons {
         write_new(&dir.join(a.file_name().unwrap_or_default()), |t| std::fs::copy(a, t).map(|_| ()))?;
     }
-    write_new(dest, |t| std::fs::copy(&built.binary, t).map(|_| ()))
+    write_new(dest, |t| copy_file(&built.binary, t))
 }
 
 /// Ad-hoc signs a binary with the JIT entitlement (see JIT_ENTITLEMENTS).
