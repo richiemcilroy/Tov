@@ -643,8 +643,15 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     }
     if let Some(archives) = &tls_archives {
         cmd.args(archives);
-        // BoringSSL is C++ (no exceptions or RTTI): a few libc++/libstdc++ helpers
-        cmd.arg(if cfg!(target_vendor = "apple") { "-lc++" } else { "-lstdc++" });
+        // BoringSSL is C++ (no exceptions or RTTI): a few libc++/libstdc++ helpers. On Linux, the
+        // engine's own libstdc++ when it carries one, else the system's by its file name:
+        // `-lstdc++` needs g++'s development files, which a machine with only gcc lacks
+        let bundled = jsc.as_ref().and_then(|j| j.libs.iter().find(|l| l.ends_with("/libstdc++.a")));
+        match bundled {
+            _ if cfg!(target_vendor = "apple") => cmd.arg("-lc++"),
+            Some(lib) => cmd.arg(lib),
+            None => cmd.arg("-l:libstdc++.so.6"),
+        };
     }
     cmd.arg("-lm");
     if !cfg!(target_vendor = "apple") && !cfg!(windows) {
