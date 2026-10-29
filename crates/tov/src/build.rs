@@ -381,16 +381,22 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let codegen::Program { c: mut c_src, mut uses_tls, uses_regexp, npm } = program;
     let mut native = false;
     let mut addons: Vec<PathBuf> = Vec::new();
-    // The blob, when it's appended to the binary rather than assembled into it (see with_blob)
-    let mut appended_blob: Option<PathBuf> = None;
-    // npm packages: bundled into a blob the program embeds (see runtime/js.c)
-    if !npm.is_empty() {
+    // npm packages with Tov's own engine: the JavaScript goes after the binary, which therefore
+    // doesn't depend on it, so the packages are bundled on a thread while the program compiles
+    // and links. The binary has what any bundle could ask of it: the TLS library (Node.js's
+    // crypto and fetch) and zlib installed before main, and Node-API for native addons.
+    let bundling = (!npm.is_empty() && own_jsc_dir().is_some()).then(|| {
+        let (root, npm) = (npm_root.clone(), npm.clone());
+        std::thread::spawn(move || crate::npm::bundle(&root, &npm))
+    });
+    if bundling.is_some() {
+        uses_tls = true;
+        native = true;
+        c_src.push_str("__attribute__((constructor)) static void tvg_npm_tls(void) { tv_tls_install(); tv_zlib_install(); }\n");
+        c_src.push_str("const unsigned char tv_js_blob[8] = \"TOV_APP\";\n");
+    } else if !npm.is_empty() {
+        // npm packages: bundled into a blob the program embeds (see runtime/js.c)
         let b = crate::npm::bundle(&npm_root, &npm).map_err(|e| BuildError::Message(format!("can't bundle the npm packages: {e}")))?;
-        if std::env::var_os("TOV_TRACE").is_some() {
-            for w in &b.warnings {
-                eprintln!("npm: {w}");
-            }
-        }
         // Node.js's crypto and zlib, and fetch(), run on the TLS library's BoringSSL, codecs and TLS
         // client (runtime/crypto.c, compress.c, tls.c): a bundle with them links the library, and
         // installs them before main
@@ -400,23 +406,11 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
                 c_src.push_str(&format!("__attribute__((constructor)) static void tvg_npm_{}(void) {{ {install}(); }}\n", module[5..].replace('/', "_")));
             }
         }
-        let blob = b.blob();
-        let c_dir = cache_dir().join("c");
-        std::fs::create_dir_all(&c_dir).map_err(|e| BuildError::Message(format!("can't create {}: {e}", c_dir.display())))?;
-        let path = c_dir.join(format!("npm-{}.blob", hash_hex(&[&blob])));
-        if !cached(&path) {
-            let tmp = path.with_extension(format!("tmp{}", tmp_tag()));
-            std::fs::write(&tmp, &blob).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| BuildError::Message(format!("can't write {}: {e}", path.display())))?;
-        }
+        let path = write_blob(&b)?;
         native = b.native;
         addons = b.addons;
         let p = path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
-        if own_jsc_dir().is_some() {
-            // (with Tov's own engine, appended to the binary: a build whose JavaScript changed
-            // doesn't link the program again)
-            c_src.push_str("const unsigned char tv_js_blob[8] = \"TOV_APP\";\n");
-            appended_blob = Some(path.clone());
-        } else if cfg!(target_vendor = "apple") {
+        if cfg!(target_vendor = "apple") {
             c_src.push_str(&format!("__asm__(\".section __TEXT,__const\\n.globl _tv_js_blob\\n.p2align 3\\n_tv_js_blob:\\n.incbin \\\"{p}\\\"\\n.byte 0\\n.text\\n\");\n"));
         } else {
             c_src.push_str(&format!("__asm__(\".section .rodata.tv_js_blob,\\\"a\\\"\\n.globl tv_js_blob\\n.p2align 3\\ntv_js_blob:\\n.incbin \\\"{p}\\\"\\n.byte 0\\n.text\\n\");\n"));
@@ -492,6 +486,10 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
             // (the cache is pruned by modification time)
             let _ = std::fs::File::open(&bin_dir).and_then(|f| f.set_modified(SystemTime::now()));
         }
+        let (binary, addons, appended_blob) = match bundling {
+            Some(h) => with_bundle(binary, h)?,
+            None => (binary, addons, None),
+        };
         let (binary, blob) = installable(binary, appended_blob, opts)?;
         return Ok(Built { binary, blob, addons, tls: uses_tls, jsc_own, cached: true, sources, npm: !npm.is_empty(), timings: (t1 - t0, t2 - t1, Duration::ZERO) });
     }
@@ -632,7 +630,12 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
             if cfg!(target_vendor = "apple") {
                 cmd.args(["-Wl,-exported_symbol,_napi_*", "-Wl,-exported_symbol,_node_api_*"]);
             } else {
-                cmd.arg("-rdynamic");
+                // (Node-API's functions only, not every symbol of the program and the engine)
+                let list = c_dir.join("napi-exports.list");
+                if !list.is_file() {
+                    let _ = write_new(&list, |t| std::fs::write(t, "{ napi_*; node_api_*; };\n"));
+                }
+                cmd.arg(format!("-Wl,--dynamic-list={}", list.display()));
             }
         }
         cmd.args(&jsc.libs);
@@ -678,6 +681,10 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         write_new(to, |t| std::fs::write(t, bytes)).map_err(|e| BuildError::Message(format!("can't write {}: {e}", to.display())))?;
     }
     std::fs::rename(&tmp, &binary).map_err(|e| BuildError::Message(format!("can't move the binary into the cache: {e}")))?;
+    let (binary, addons, appended_blob) = match bundling {
+        Some(h) => with_bundle(binary, h)?,
+        None => (binary, addons, None),
+    };
     let (binary, blob) = installable(binary, appended_blob, opts)?;
     let t3 = Instant::now();
     Ok(Built { binary, blob, addons, tls: uses_tls, jsc_own, cached: false, sources, npm: !npm.is_empty(), timings: (t1 - t0, t2 - t1, t3 - t2) })
@@ -936,6 +943,57 @@ fn append_blob(base: &Path, blob: &Path, to: &Path) -> std::io::Result<()> {
     f.write_all(&at.to_le_bytes())?;
     f.write_all(&(js.len() as u64 + 1).to_le_bytes())?;
     f.write_all(b"TOV_BLOB")
+}
+
+/// npm packages bundled on a thread (see `bundling` in `build`): the bundle's blob in the cache,
+/// and its native addons put beside a copy of the binary in a directory of their own (a hard
+/// link: the cache's files aren't changed in place), as `tov run` loads them from beside the
+/// program. (binary, addons, blob)
+fn with_bundle(binary: PathBuf, bundling: std::thread::JoinHandle<Result<crate::npm::Bundle, String>>) -> Result<(PathBuf, Vec<PathBuf>, Option<PathBuf>), BuildError> {
+    let b = bundling.join().map_err(|_| BuildError::Message("internal error: bundling the npm packages panicked".into()))?;
+    let b = b.map_err(|e| BuildError::Message(format!("can't bundle the npm packages: {e}")))?;
+    let blob = write_blob(&b)?;
+    if b.addons.is_empty() {
+        return Ok((binary, Vec::new(), Some(blob)));
+    }
+    let fail = |e: std::io::Error| BuildError::Message(format!("can't put the program's addons in the cache: {e}"));
+    let mut bytes = Vec::new();
+    for a in &b.addons {
+        bytes.push(std::fs::read(a).map_err(|e| BuildError::Message(format!("can't read {}: {e}", a.display())))?);
+    }
+    let name = binary.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let dir = binary.with_file_name(format!("{name}-{}", hash_hex(&bytes.iter().map(|b| b.as_slice()).collect::<Vec<_>>())));
+    let placed = dir.join(&name);
+    let addons: Vec<PathBuf> = b.addons.iter().map(|a| dir.join(a.file_name().unwrap_or_default())).collect();
+    if cached(&placed) {
+        let _ = std::fs::File::open(&dir).and_then(|f| f.set_modified(SystemTime::now()));
+    } else {
+        std::fs::create_dir_all(&dir).map_err(fail)?;
+        for (bytes, to) in bytes.iter().zip(&addons) {
+            write_new(to, |t| std::fs::write(t, bytes)).map_err(fail)?;
+        }
+        let tmp = dir.join(format!("{name}.tmp{}", tmp_tag()));
+        std::fs::hard_link(&binary, &tmp).or_else(|_| copy_file(&binary, &tmp)).and_then(|_| std::fs::rename(&tmp, &placed)).map_err(fail)?;
+    }
+    Ok((placed, addons, Some(blob)))
+}
+
+/// The bundle's blob in the cache (`npm-<hash>.blob`), written there the first time.
+fn write_blob(b: &crate::npm::Bundle) -> Result<PathBuf, BuildError> {
+    if std::env::var_os("TOV_TRACE").is_some() {
+        for w in &b.warnings {
+            eprintln!("npm: {w}");
+        }
+    }
+    let blob = b.blob();
+    let c_dir = cache_dir().join("c");
+    std::fs::create_dir_all(&c_dir).map_err(|e| BuildError::Message(format!("can't create {}: {e}", c_dir.display())))?;
+    let path = c_dir.join(format!("npm-{}.blob", hash_hex(&[&blob])));
+    if !cached(&path) {
+        let tmp = path.with_extension(format!("tmp{}", tmp_tag()));
+        std::fs::write(&tmp, &blob).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| BuildError::Message(format!("can't write {}: {e}", path.display())))?;
+    }
+    Ok(path)
 }
 
 /// A linked binary and the JavaScript to go after it: the program in the cache (with_blob), or
