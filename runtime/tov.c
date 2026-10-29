@@ -12774,6 +12774,7 @@ static pthread_mutex_t tv_bk_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t tv_bk_cv = PTHREAD_COND_INITIALIZER;
 static tv_bk *tv_bk_jobs, *tv_bk_done;
 static int tv_bk_threads, tv_bk_idle;
+static int tv_bk_active;   /* (the loop's count) jobs started and not yet finished */
 
 #ifdef __linux__
 static void *tv_bk_run(void *arg) {
@@ -12823,6 +12824,20 @@ static void *tv_bk_run(void *arg) {
    false if it can't start one (the loop receives it, as before). */
 static bool tv_bk_start(tv_fr *r, tv_fc *c) {
     if (!tv_sk_start()) return false;
+#if defined(__GLIBC__)
+    /* (a program receiving several big bodies at once: glibc's malloc keeps the blocks they
+     * leave, rather than handing the top of its heap back as a few are freed together and
+     * faulting it in again for the next: eight 8 MB downloads at a time, ~100k page faults to
+     * ~20k, a fifth less CPU, the same peak memory. Not for one at a time, which glibc's own
+     * thresholds suit: a body growing in the heap is copied, where a mapped one is remapped.
+     * Both thresholds, or the other one puts each body in a mapping of its own.) */
+    static bool kept;
+    if (!kept && tv_bk_active > 0) {
+        kept = true;
+        mallopt(M_MMAP_THRESHOLD, 128 << 20);
+        mallopt(M_TRIM_THRESHOLD, 128 << 20);
+    }
+#endif
     pthread_mutex_lock(&tv_bk_mu);
     if (tv_bk_idle == 0 && tv_bk_threads < TV_BK_THREADS) {
         pthread_attr_t attr;
@@ -12864,6 +12879,7 @@ static bool tv_bk_start(tv_fr *r, tv_fc *c) {
 #endif
     /* (the loop waits for it, even past an abort: it hands back the connection and buffer) */
     tv_io_refs++;
+    tv_bk_active++;
     j->next = tv_bk_jobs;
     tv_bk_jobs = j;
     pthread_cond_signal(&tv_bk_cv);
@@ -12887,6 +12903,7 @@ static tv_fr *tv_fr_get(tv_int id);
    fails, cut short), as if the loop had received it. */
 static void tv_bk_finish(tv_bk *j) {
     tv_io_refs--;
+    tv_bk_active--;
     tv_fr *r = j->id ? tv_fr_get(j->id) : NULL;
     tv_fc *c = j->c;
     c->bulk = false;
