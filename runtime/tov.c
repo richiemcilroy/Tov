@@ -4942,14 +4942,31 @@ tv_arrbuf tv_empty_arrbuf = {-1, 0, 0, NULL};
 /* An elements' block of its own (`ext`): 16 bytes, then room left free at the front for
  * `unshift` (none at first; `shift` leaves its slot there), then the elements. Its size in
  * bytes, front included, is the word before the elements: what `ext` points to after the
- * front is all the block knows of where it starts. */
+ * front is all the block knows of where it starts. The block's first word is its size (the
+ * front's word is never before the second): a small block comes from the small-object free
+ * lists and goes back to them, as freeing a malloc block of that size costs several times as
+ * much (macOS's allocator reads the clock on every free). */
 enum { TV_EXT_PRE = 16 };
 static inline size_t tv_ext_front(const unsigned char *ext) { size_t f; memcpy(&f, ext - sizeof f, sizeof f); return f; }
 static inline void tv_ext_set_front(unsigned char *ext, size_t f) { memcpy(ext - sizeof f, &f, sizeof f); }
 static inline unsigned char *tv_ext_base(unsigned char *ext) { return ext - TV_EXT_PRE - tv_ext_front(ext); }
+static inline size_t tv_ext_size(const unsigned char *base) { size_t n; memcpy(&n, base, sizeof n); return n; }
+/* (16-byte multiples: the elements stay as aligned as malloc's) */
+static unsigned char *tv_ext_block(size_t size) {
+    size = (size + 15) & ~(size_t)15;
+    unsigned char *b = (unsigned char *)(size <= TV_SMALL_MAX ? tv_small_alloc(size) : tv_alloc(size));
+    memcpy(b, &size, sizeof size);
+    return b;
+}
+static void tv_ext_free(unsigned char *ext) {
+    unsigned char *b = tv_ext_base(ext);
+    size_t size = tv_ext_size(b);
+    if (size <= TV_SMALL_MAX) tv_small_free(b, size);
+    else free(b);
+}
 /* A block for `bytes` of elements after `front` free bytes: where the elements start. */
 static unsigned char *tv_ext_new(size_t front, size_t bytes) {
-    unsigned char *b = (unsigned char *)tv_alloc(TV_EXT_PRE + front + (bytes ? bytes : 1));
+    unsigned char *b = tv_ext_block(TV_EXT_PRE + front + (bytes ? bytes : 1));
     unsigned char *ext = b + TV_EXT_PRE + front;
     tv_ext_set_front(ext, front);
     return ext;
@@ -5042,7 +5059,7 @@ void tv_arrbuf_release_slow(tv_arrbuf *TV_NOESCAPE p, const tv_type *t) {
         return;
     }
     if (__builtin_expect(tv_arr_props_n != 0, 0)) tv_arr_props_forget(p);
-    if (p->ext) free(tv_ext_base(p->ext));
+    if (p->ext) tv_ext_free(p->ext);
     free(p);
 }
 
@@ -5103,7 +5120,7 @@ void tv_arrbuf_free_block(tv_arrbuf *TV_NOESCAPE p, size_t es) {
     int64_t inl = p->cap;
     if (p->ext) {
         memcpy(&inl, p + 1, sizeof inl);
-        free(tv_ext_base(p->ext));
+        tv_ext_free(p->ext);
     }
     size_t s = tv_arrbuf_block((size_t)inl * es);
 #ifndef TV_ARRBUF_PLAIN
@@ -5139,14 +5156,17 @@ void tv_arr_make_unique(tv_arr *a, const tv_type *t, tv_int min_cap) {
             int64_t inl = p->cap;
             memcpy(p + 1, &inl, sizeof inl);
             p->ext = d;
-        } else if (tv_ext_front(p->ext) == 0) {
-            unsigned char *b = (unsigned char *)tv_realloc(p->ext - TV_EXT_PRE, TV_EXT_PRE + (bytes ? bytes : 1));
+        } else if (tv_ext_front(p->ext) == 0 && tv_ext_size(p->ext - TV_EXT_PRE) > TV_SMALL_MAX) {
+            /* (a malloc block, growing: in place when the allocator can) */
+            size_t size = (TV_EXT_PRE + (bytes ? bytes : 1) + 15) & ~(size_t)15;
+            unsigned char *b = (unsigned char *)tv_realloc(p->ext - TV_EXT_PRE, size);
+            memcpy(b, &size, sizeof size);
             p->ext = b + TV_EXT_PRE;
         } else {
-            /* (room left at the front: the elements move to the start of a new block) */
+            /* (room left at the front, or a small block: the elements move to the start of a new one) */
             unsigned char *d = tv_ext_new(0, bytes);
             if (es && p->len) memcpy(d, p->ext, (size_t)p->len * es);
-            free(tv_ext_base(p->ext));
+            tv_ext_free(p->ext);
             p->ext = d;
         }
         p->cap = nc;
@@ -5303,7 +5323,7 @@ void tv_arr_unshift(tv_arr *a, const tv_type *t, void *elem) {
         unsigned char *d = tv_ext_new(front, (size_t)(len + 1) * es + back);
         memcpy(d + es, tv_arrbuf_data(p), (size_t)len * es);
         if (p->ext) {
-            free(tv_ext_base(p->ext));
+            tv_ext_free(p->ext);
         } else {
             int64_t inl = p->cap;
             memcpy(p + 1, &inl, sizeof inl);
