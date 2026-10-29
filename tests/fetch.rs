@@ -431,7 +431,7 @@ fn main() {
                 if bun_strict { failed.push(msg) } else { bun_notes.push(name.clone()) }
             }
         }
-        let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false };
+        let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false, install: false };
         match tov::build::build(std::slice::from_ref(case), &root, &opts) {
             Ok(built) => {
                 if !built.tls {
@@ -453,7 +453,7 @@ fn main() {
         }
     }
     // Only programs that fetch link TLS.
-    let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false };
+    let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false, install: false };
     let hello = std::env::temp_dir().join(format!("tov-no-tls-{}.tov", std::process::id()));
     std::fs::write(&hello, "console.log(\"hi\")\n").unwrap();
     match tov::build::build(std::slice::from_ref(&hello), &root, &opts) {

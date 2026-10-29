@@ -36,7 +36,7 @@ fn main() {
     let mut failed = Vec::new();
     for case in &cases {
         let name = case.file_stem().unwrap().to_string_lossy().into_owned();
-        let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false };
+        let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false, install: false };
         let built = match tov::build::build(std::slice::from_ref(case), &root, &opts) {
             Ok(b) => b,
             Err(tov::build::BuildError::Diagnostics(sm, d)) => {

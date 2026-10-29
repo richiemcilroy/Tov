@@ -126,7 +126,7 @@ fn check(failed: &mut Vec<String>, name: &str, ok: bool, detail: impl std::fmt::
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
     let app = root.join("tests/http/app.tov");
-    let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O2".into(), emit_c: None, symbols: false };
+    let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O2".into(), emit_c: None, symbols: false, install: false };
     let built = match tov::build::build(std::slice::from_ref(&app), &root, &opts) {
         Ok(b) => b,
         Err(tov::build::BuildError::Diagnostics(sm, d)) => panic!("build failed\n{}", tov::diag::render_text(&d, &sm)),

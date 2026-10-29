@@ -19,7 +19,7 @@ fn main() {
         // (`name.test.ts`: its tests run, as `tov test` does; failing ones show in the output)
         let testing = name.ends_with(".test");
         let mode = if testing { tov::codegen::Mode::Test } else { tov::codegen::Mode::Run };
-        let opts = tov::build::Options { mode, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false };
+        let opts = tov::build::Options { mode, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false, install: false };
         let built = match tov::build::build(std::slice::from_ref(case), &root, &opts) {
             Ok(b) => b,
             Err(tov::build::BuildError::Diagnostics(sm, d)) => {
@@ -47,7 +47,7 @@ fn main() {
         }
     }
     // Every test in examples/ must pass natively.
-    let opts = tov::build::Options { mode: tov::codegen::Mode::Test, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false };
+    let opts = tov::build::Options { mode: tov::codegen::Mode::Test, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false, install: false };
     let examples = root.join("examples");
     match tov::build::build(&[examples], &root, &opts) {
         Ok(b) => {

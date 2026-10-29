@@ -324,7 +324,7 @@ fn execute(f: Flags, cmd: BuildCmd) -> ExitCode {
     }
     let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mode = if cmd == BuildCmd::Test { tov::codegen::Mode::Test } else { tov::codegen::Mode::Run };
-    let opts = tov::build::Options { mode, unchecked: f.unchecked, opt: f.opt, emit_c: f.emit_c, symbols: f.symbols };
+    let opts = tov::build::Options { mode, unchecked: f.unchecked, opt: f.opt, emit_c: f.emit_c, symbols: f.symbols, install: cmd == BuildCmd::Build };
     let dest = f.out.unwrap_or_else(|| {
         let stem = paths[0].file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "main".into());
         PathBuf::from(if stem == "." || stem.is_empty() { "main".to_string() } else { stem })

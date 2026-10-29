@@ -38,7 +38,11 @@ pub enum BuildError {
 }
 
 pub struct Built {
+    /// The program; with `blob`, the program as linked, which is the program with it appended
     pub binary: PathBuf,
+    /// The program's JavaScript for `install` to append to `binary` (see with_blob), when it was
+    /// built only to be installed (`Options::install`)
+    pub blob: Option<PathBuf>,
     /// The Node-API addons it loads from its own directory, beside `binary` (see `install`).
     pub addons: Vec<PathBuf>,
     /// It links TLS (the program calls fetch()).
@@ -65,6 +69,10 @@ pub struct Options {
     /// Keep function names and C debug info (`tov build -g`) for debuggers and profilers;
     /// otherwise local symbols are stripped (smaller binaries).
     pub symbols: bool,
+    /// The program is only installed (`install`), not run from the cache: a program whose
+    /// JavaScript goes after the binary is then put together where it's installed, not in the
+    /// cache as well (`Built::blob`).
+    pub install: bool,
 }
 
 /// The files on disk behind a source map (not the standard library's built-in modules).
@@ -301,6 +309,9 @@ fn gnu_order_script(order: &Path, hash: &str) -> Option<PathBuf> {
 pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, BuildError> {
     prune_cache();
     let t0 = Instant::now();
+    if !cfg!(target_vendor = "apple") && !cfg!(windows) && own_jsc_dir().is_some() {
+        std::thread::spawn(static_icu);
+    }
     let loaded = driver::load_with(paths, base, opts.mode == crate::codegen::Mode::Test).map_err(BuildError::Message)?;
     let driver::Loaded { sm, mut interner, mut modules, diags } = loaded;
     let sources = source_paths(&sm);
@@ -481,11 +492,8 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
             // (the cache is pruned by modification time)
             let _ = std::fs::File::open(&bin_dir).and_then(|f| f.set_modified(SystemTime::now()));
         }
-        let binary = match &appended_blob {
-            Some(blob) => with_blob(&binary, blob)?,
-            None => binary,
-        };
-        return Ok(Built { binary, addons, tls: uses_tls, jsc_own, cached: true, sources, npm: !npm.is_empty(), timings: (t1 - t0, t2 - t1, Duration::ZERO) });
+        let (binary, blob) = installable(binary, appended_blob, opts)?;
+        return Ok(Built { binary, blob, addons, tls: uses_tls, jsc_own, cached: true, sources, npm: !npm.is_empty(), timings: (t1 - t0, t2 - t1, Duration::ZERO) });
     }
     let c_dir = dir.join("c");
     for d in [&bin_dir, &c_dir] {
@@ -526,52 +534,72 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     };
     let tls_job = || -> Result<Option<[PathBuf; 2]>, String> { tls.as_ref().map(|t| t.build(&cc, &c_dir)).transpose().map_err(message) };
     let re_job = || -> Result<Vec<PathBuf>, String> { if uses_regexp { regexp_objects(&cc, &flags, &c_dir, &re_key).map_err(message) } else { Ok(Vec::new()) } };
+    // Every program starts with the same runtime interface and prelude: precompile it once
+    // (per compiler and flags) and compile only the program's own code against it.
+    let prefix = codegen::fixed_prefix();
+    let pch = if c_src.starts_with(prefix.as_str()) { prebuilt_pch } else { None };
+    let c_path = c_dir.join(format!("{key}.c"));
+    let c_text: &str = match &pch {
+        Some(_) => &c_src[prefix.len()..],
+        None => &c_src,
+    };
+    let mut program_flags = flags.clone();
+    let include;
+    if let Some(h) = &pch {
+        include = h.to_string_lossy().into_owned();
+        program_flags.push("-include");
+        program_flags.push(&include);
+    }
+    // (the program's own code to an object, then linked, when a library it links still has to
+    // be compiled: the program compiles meanwhile rather than after; otherwise one command
+    // compiles and links it)
+    let ld = linker(&cc);
+    let busy = !(cached(&rt_obj) || (rt_key == tls_files::PREBUILT_RT_KEY && !tls_files::PREBUILT_RT.is_empty()))
+        || (js_flags.is_some() && !js_objects_ready(&c_dir, &js_key))
+        || tls.as_ref().is_some_and(|t| !t.ready(&c_dir))
+        || (uses_regexp && !regexp_units(&c_dir, &re_key).1.iter().all(|o| cached(o)));
+    let separate = ld != cc || busy;
+    let obj = c_dir.join(format!("{key}.tmp{}.o", tmp_tag()));
+    let compile_job = || -> Result<(), BuildError> {
+        std::fs::write(&c_path, c_text).map_err(|e| BuildError::Message(format!("can't write {}: {e}", c_path.display())))?;
+        if !separate {
+            return Ok(());
+        }
+        let mut compile = Command::new(&cc);
+        compile.args(&program_flags).arg("-c").arg("-o").arg(&obj).arg(&c_path);
+        run_cc(compile, &cc, &c_path)
+    };
     let parallel = std::thread::scope(|s| {
         let rt_thread = s.spawn(rt_job);
         let js_thread = s.spawn(js_job);
         let tls_thread = s.spawn(tls_job);
         let re_thread = s.spawn(re_job);
-        // Every program starts with the same runtime interface and prelude: precompile it once
-        // (per compiler and flags) and compile only the program's own code against it.
-        let prefix = codegen::fixed_prefix();
-        let pch = if c_src.starts_with(prefix.as_str()) { prebuilt_pch } else { None };
-        let c_path = c_dir.join(format!("{key}.c"));
-        let c_text: &str = match &pch {
-            Some(_) => &c_src[prefix.len()..],
-            None => &c_src,
-        };
-        let written = std::fs::write(&c_path, c_text).map_err(|e| format!("can't write {}: {e}", c_path.display()));
+        let compiled = compile_job();
         let rt = rt_thread.join().unwrap_or_else(|_| Err("internal error: compiling the runtime panicked".into()));
         let js = js_thread.join().unwrap_or_else(|_| Err("internal error: compiling the JavaScript bridge panicked".into()));
         let tls = tls_thread.join().unwrap_or_else(|_| Err("internal error: compiling the TLS library panicked".into()));
         let re = re_thread.join().unwrap_or_else(|_| Err("internal error: compiling the regular expression library panicked".into()));
-        (pch, c_path, written, rt, js, tls, re)
+        (compiled, rt, js, tls, re)
     });
-    let (pch, c_path, written, rt_done, js_objs, tls_archives, re_objs) = parallel;
+    let (compiled, rt_done, js_objs, tls_archives, re_objs) = parallel;
+    if compiled.is_err() {
+        let _ = std::fs::remove_file(&obj);
+    }
+    compiled?;
     let re_objs = re_objs.map_err(BuildError::Message)?;
-    written.map_err(BuildError::Message)?;
     rt_done.map_err(BuildError::Message)?;
     let js_objs = js_objs.map_err(BuildError::Message)?;
     let tls_archives = tls_archives.map_err(BuildError::Message)?;
-    let mut flags = flags.clone();
-    let include;
-    if let Some(h) = &pch {
-        include = h.to_string_lossy().into_owned();
-        flags.push("-include");
-        flags.push(&include);
-    }
-    // Compile to a temporary name, then rename: concurrent builds never see a partial binary.
+    // Link to a temporary name, then rename: concurrent builds never see a partial binary.
     let tmp = bin_dir.join(format!("{key}.tmp{}", tmp_tag()));
-    let ld = linker(&cc);
     let mut cmd = Command::new(&ld);
-    let obj = c_dir.join(format!("{key}.tmp{}.o", tmp_tag()));
-    if ld == cc {
-        cmd.args(&flags).arg("-o").arg(&tmp).arg(&c_path);
-    } else {
-        let mut compile = Command::new(&cc);
-        compile.args(&flags).arg("-c").arg("-o").arg(&obj).arg(&c_path);
-        run_cc(compile, &cc, &c_path)?;
+    if ld != cc {
         cmd.args(extra.split_whitespace()).arg("-o").arg(&tmp).arg(&obj);
+    } else if separate {
+        // (the compiler's flags, as one command would have them, for what they mean to a link)
+        cmd.args(&flags).arg("-o").arg(&tmp).arg(&obj);
+    } else {
+        cmd.args(&program_flags).arg("-o").arg(&tmp).arg(&c_path);
     }
     cmd.arg(&rt_obj);
     cmd.args(&re_objs);
@@ -644,24 +672,36 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         write_new(to, |t| std::fs::write(t, bytes)).map_err(|e| BuildError::Message(format!("can't write {}: {e}", to.display())))?;
     }
     std::fs::rename(&tmp, &binary).map_err(|e| BuildError::Message(format!("can't move the binary into the cache: {e}")))?;
-    let binary = match &appended_blob {
-        Some(blob) => with_blob(&binary, blob)?,
-        None => binary,
-    };
+    let (binary, blob) = installable(binary, appended_blob, opts)?;
     let t3 = Instant::now();
-    Ok(Built { binary, addons, tls: uses_tls, jsc_own, cached: false, sources, npm: !npm.is_empty(), timings: (t1 - t0, t2 - t1, t3 - t2) })
+    Ok(Built { binary, blob, addons, tls: uses_tls, jsc_own, cached: false, sources, npm: !npm.is_empty(), timings: (t1 - t0, t2 - t1, t3 - t2) })
+}
+
+fn js_object_paths(c_dir: &Path, key: &str) -> Vec<PathBuf> {
+    vec![c_dir.join(format!("js-{key}.o")), c_dir.join(format!("node-{key}.o")), c_dir.join(format!("napi-{key}.o"))]
+}
+
+/// The bridge's objects as kept beside Tov's engine: compiled once for it, as they are part of
+/// what programs link with it, so a cache of its own (a fresh TOV_CACHE_DIR, say) takes them
+/// from there.
+fn js_kept_paths(objs: &[PathBuf]) -> Option<Vec<PathBuf>> {
+    own_jsc_dir().map(|d| objs.iter().map(|o| d.join("bridge").join(o.file_name().unwrap())).collect())
+}
+
+/// Whether js_objects has its objects without compiling them.
+fn js_objects_ready(c_dir: &Path, key: &str) -> bool {
+    let objs = js_object_paths(c_dir, key);
+    objs.iter().all(|o| cached(o)) || js_kept_paths(&objs).is_some_and(|k| k.iter().all(|k| cached(k)))
 }
 
 /// The compiler flags without the precompiled header's `-include` (for other C files).
 /// runtime/js.c and runtime/node.c compiled once per compiler and flags: (js.o, node.o).
 fn js_objects(cc: &str, flags: &[String], c_dir: &Path, key: &str) -> Result<Vec<PathBuf>, BuildError> {
-    let objs = vec![c_dir.join(format!("js-{key}.o")), c_dir.join(format!("node-{key}.o")), c_dir.join(format!("napi-{key}.o"))];
+    let objs = js_object_paths(c_dir, key);
     if objs.iter().all(|o| cached(o)) {
         return Ok(objs);
     }
-    // (compiled once for Tov's engine and kept beside it, as it is part of what programs link
-    // with it: a cache of its own, a fresh TOV_CACHE_DIR say, takes them from there)
-    let kept: Option<Vec<PathBuf>> = own_jsc_dir().map(|d| objs.iter().map(|o| d.join("bridge").join(o.file_name().unwrap())).collect());
+    let kept = js_kept_paths(&objs);
     if let Some(kept) = &kept
         && kept.iter().all(|k| cached(k))
     {
@@ -753,6 +793,21 @@ fn own_jsc_dir() -> Option<PathBuf> {
     dir.join("lib/libtovjsc.a").is_file().then_some(dir)
 }
 
+/// Linux: whether ICU's static libraries are where the compiler looks for libraries (Debian's
+/// libicu-dev has them). Asked of the compiler once (`-print-search-dirs`, its library
+/// directories); `build` asks on a thread as it starts, so the answer is in by the time a
+/// program with npm packages links (three `-print-file-name`s in a row were ~75 ms of a cold
+/// build).
+fn static_icu() -> bool {
+    static ICU: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ICU.get_or_init(|| {
+        let Ok(out) = Command::new(c_compiler().0).arg("-print-search-dirs").output() else { return false };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let dirs: Vec<PathBuf> = text.lines().filter_map(|l| l.strip_prefix("libraries: ")).flat_map(|l| std::env::split_paths(l.trim_start_matches('=')).collect::<Vec<_>>()).collect();
+        ["libicuuc.a", "libicui18n.a", "libicudata.a"].iter().all(|name| dirs.iter().any(|d| d.join(name).is_file()))
+    })
+}
+
 fn jsc_flags() -> Result<JscFlags, BuildError> {
     if let Some(dir) = own_jsc_dir() {
         // (an engine built from older patches lacks API the bridge calls: say so before C does)
@@ -776,11 +831,7 @@ fn jsc_flags() -> Result<JscFlags, BuildError> {
             // there (Debian's libicu-dev has them): a program then binds no symbols of theirs as it
             // starts (the dynamic loader was a sixth of an npm program's start); and the program
             // isn't position independent (`-no-pie`: no relocations to apply at start either)
-            let has = |name: &str| {
-                let out = Command::new(c_compiler().0).arg(format!("-print-file-name={name}")).output().ok();
-                out.is_some_and(|o| Path::new(String::from_utf8_lossy(&o.stdout).trim()).is_absolute())
-            };
-            if has("libicuuc.a") && has("libicui18n.a") && has("libicudata.a") {
+            if static_icu() {
                 libs.extend(["-Wl,-Bstatic", "-licui18n", "-licuuc", "-licudata", "-lstdc++", "-latomic", "-Wl,-Bdynamic", "-ldl", "-no-pie"].map(String::from));
             } else {
                 libs.extend(["-licui18n", "-licuuc", "-licudata", "-lstdc++", "-ldl", "-latomic"].map(String::from));
@@ -842,21 +893,11 @@ fn with_blob(base: &Path, blob: &Path) -> Result<PathBuf, BuildError> {
     let blob_name = blob.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let out = base.with_file_name(format!("{name}-{blob_name}"));
     if !cached(&out) {
-        use std::io::Write;
         let tmp = out.with_file_name(format!("{name}-{blob_name}.tmp{}", tmp_tag()));
-        copy_file(base, &tmp).map_err(fail)?;
-        let js = std::fs::read(blob).map_err(fail)?;
-        let mut f = std::fs::OpenOptions::new().append(true).open(&tmp).map_err(fail)?;
-        let len = f.metadata().map_err(fail)?.len();
-        const PAGE: u64 = 16384;
-        let at = len.div_ceil(PAGE) * PAGE;
-        f.write_all(&vec![0u8; (at - len) as usize]).map_err(fail)?;
-        f.write_all(&js).map_err(fail)?;
-        f.write_all(&[0]).map_err(fail)?;
-        f.write_all(&at.to_le_bytes()).map_err(fail)?;
-        f.write_all(&(js.len() as u64 + 1).to_le_bytes()).map_err(fail)?;
-        f.write_all(b"TOV_BLOB").map_err(fail)?;
-        drop(f);
+        if let Err(e) = append_blob(base, blob, &tmp) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(fail(e));
+        }
         std::fs::rename(&tmp, &out).map_err(fail)?;
         // (the same program's earlier ones)
         if let Some(dir) = base.parent()
@@ -872,6 +913,32 @@ fn with_blob(base: &Path, blob: &Path) -> Result<PathBuf, BuildError> {
         }
     }
     Ok(out)
+}
+
+/// Writes `to` (a new file): `base` and then `blob`, as with_blob describes.
+fn append_blob(base: &Path, blob: &Path, to: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    copy_file(base, to)?;
+    let js = std::fs::read(blob)?;
+    let mut f = std::fs::OpenOptions::new().append(true).open(to)?;
+    let len = f.metadata()?.len();
+    const PAGE: u64 = 16384;
+    let at = len.div_ceil(PAGE) * PAGE;
+    f.write_all(&vec![0u8; (at - len) as usize])?;
+    f.write_all(&js)?;
+    f.write_all(&[0])?;
+    f.write_all(&at.to_le_bytes())?;
+    f.write_all(&(js.len() as u64 + 1).to_le_bytes())?;
+    f.write_all(b"TOV_BLOB")
+}
+
+/// A linked binary and the JavaScript to go after it: the program in the cache (with_blob), or
+/// for a build only installed, the two for `install` to put together.
+fn installable(binary: PathBuf, blob: Option<PathBuf>, opts: &Options) -> Result<(PathBuf, Option<PathBuf>), BuildError> {
+    match blob {
+        Some(blob) if !opts.install => Ok((with_blob(&binary, &blob)?, None)),
+        blob => Ok((binary, blob)),
+    }
 }
 
 /// Writes `to` through a new file renamed over it: macOS kills a signed binary (or one whose
@@ -895,7 +962,12 @@ pub fn install(built: &Built, dest: &Path) -> std::io::Result<()> {
     for a in &built.addons {
         write_new(&dir.join(a.file_name().unwrap_or_default()), |t| std::fs::copy(a, t).map(|_| ()))?;
     }
-    write_new(dest, |t| copy_file(&built.binary, t))
+    // (a program whose JavaScript is appended is written here from its parts: on a file system
+    // without clones a copy of the program from the cache would write its ~80 MB twice)
+    match &built.blob {
+        Some(blob) => write_new(dest, |t| append_blob(&built.binary, blob, t)),
+        None => write_new(dest, |t| copy_file(&built.binary, t)),
+    }
 }
 
 /// Ad-hoc signs a binary with the JIT entitlement (see JIT_ENTITLEMENTS).
@@ -1007,6 +1079,13 @@ impl TlsArchive {
         "c++".into()
     }
 
+    /// Whether `build` has the archives without compiling them (cached, or carried by the compiler).
+    fn ready(&self, c_dir: &Path) -> bool {
+        let vendor = cached(&c_dir.join(format!("vendor-{}.a", self.vendor_key))) || (self.vendor_key == tls_files::VENDOR_ARCHIVE_KEY && !tls_files::VENDOR_ARCHIVE.is_empty());
+        let runtime = cached(&c_dir.join(format!("tls-{}.a", self.key))) || (self.key == tls_files::RUNTIME_ARCHIVE_KEY && !tls_files::RUNTIME_ARCHIVE.is_empty());
+        vendor && runtime
+    }
+
     /// The archives to link (the runtime's, then the vendored libraries it uses), compiling them
     /// first if they aren't cached.
     fn build(&self, cc: &str, c_dir: &Path) -> Result<[PathBuf; 2], BuildError> {
@@ -1091,11 +1170,16 @@ impl TlsArchive {
 /// A 128-bit content hash (two independent 64-bit lanes), hex-encoded. For cache keys, not security.
 /// The regular expression library's objects (runtime/regexp.c, QuickJS's libregexp and PCRE2),
 /// compiled once per compiler and flags, in parallel.
-fn regexp_objects(cc: &str, flags: &[&str], c_dir: &Path, key: &str) -> Result<Vec<PathBuf>, BuildError> {
+fn regexp_units(c_dir: &Path, key: &str) -> (Vec<&'static str>, Vec<PathBuf>) {
     let mut units: Vec<&str> = vec!["regexp.c", "libregexp.c", "libunicode.c", "cutils.c"];
     units.extend(codegen::REGEXP_FILES.iter().map(|f| f.0).filter(|n| n.starts_with("pcre2/src/") && n.ends_with(".c")));
     let stem = |u: &str| Path::new(u).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let objs: Vec<PathBuf> = units.iter().map(|u| c_dir.join(format!("re-{key}-{}.o", stem(u)))).collect();
+    (units, objs)
+}
+
+fn regexp_objects(cc: &str, flags: &[&str], c_dir: &Path, key: &str) -> Result<Vec<PathBuf>, BuildError> {
+    let (units, objs) = regexp_units(c_dir, key);
     if objs.iter().all(|o| cached(o)) {
         return Ok(objs);
     }

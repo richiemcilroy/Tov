@@ -140,7 +140,7 @@ fn main() {
 fn compare(name: &str, requests: &[String]) -> (usize, usize) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
     let dir = root.join("tests/parity");
-    let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O2".into(), emit_c: None, symbols: false };
+    let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O2".into(), emit_c: None, symbols: false, install: false };
     let built = match tov::build::build(&[dir.join(format!("{name}.tov.ts"))], &root, &opts) {
         Ok(b) => b,
         Err(tov::build::BuildError::Diagnostics(sm, d)) => panic!("{name}: build failed\n{}", tov::diag::render_text(&d, &sm)),
