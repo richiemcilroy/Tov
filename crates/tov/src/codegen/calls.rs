@@ -1799,10 +1799,10 @@ impl<'c, 'a> Gen<'c, 'a> {
         let filters = stages.iter().filter(|s| s.0).count();
         // the result
         let (res, stop) = match name {
+            // (made once the source is: sized by it, below)
             "map" | "filter" => {
-                let Ty::Array(rt) = self.tget(ty) else { return None };
-                let rd = self.desc(rt);
-                (Some(self.tmp(ty, &format!("tv_arr_with_capacity({rd}, 0)"), true)), None)
+                let Ty::Array(_) = self.tget(ty) else { return None };
+                (None, None)
             }
             "some" => (Some(self.tmp(BOOL, "false", false)), Some("")),
             "every" => (Some(self.tmp(BOOL, "true", false)), Some("")),
@@ -1828,6 +1828,16 @@ impl<'c, 'a> Gen<'c, 'a> {
         let src = self.expr(cur);
         // (the callbacks change nothing: the source stays as it is through the loop)
         let src = self.coerce(src, src_ty);
+        // (a map's result is the source's length; a filtered one has room for up to 16 of it in
+        // its own block, so a short result needs no second allocation for its elements)
+        let res = match (name, &self.tget(ty)) {
+            ("map" | "filter", Ty::Array(rt)) => {
+                let rd = self.desc(*rt);
+                let cap = if filters == 0 && name == "map" { format!("tv_arr_len({})", src.code) } else { format!("(tv_arr_len({0}) < 16 ? tv_arr_len({0}) : 16)", src.code) };
+                Some(self.tmp(ty, &format!("tv_arr_with_capacity({rd}, {cap})"), true))
+            }
+            _ => res,
+        };
         let cbs: Vec<_> = stages.iter().map(|s| s.1).collect();
         let cbs: Vec<_> = cbs.into_iter().map(|a| self.prepare_callback(a)).collect();
         let sink = self.prepare_callback(args[0].expr);
@@ -1979,7 +1989,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                         let cap = if name == "map" { format!("tv_arr_len({})", arr.code) } else { "0".into() };
                         (self.tmp(ty, &format!("tv_arr_with_capacity({rd}, {cap})"), true), ty)
                     }
-                    "filter" => (self.tmp(ty, &format!("tv_arr_with_capacity({d}, 0)"), true), ty),
+                    // (room for up to 16 in its own block: see the fused chains)
+                    "filter" => (self.tmp(ty, &format!("tv_arr_with_capacity({d}, tv_arr_len({0}) < 16 ? tv_arr_len({0}) : 16)", arr.code), true), ty),
                     "forEach" => (Val::plain("0", VOID), VOID),
                     "some" => (self.tmp(BOOL, "false", false), BOOL),
                     "every" => (self.tmp(BOOL, "true", false), BOOL),
