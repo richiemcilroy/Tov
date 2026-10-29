@@ -694,6 +694,127 @@ typedef struct tv_class_space { char *cur, *lim; uint8_t grow; } tv_class_space;
 enum { TV_ARENA_BLOCK = 16 << 20 };
 static char *tv_bump, *tv_bump_end;
 static size_t tv_carved;
+
+/* Spans: runs of free blocks, whatever their class, any class can carve again. Each class's free
+ * list only feeds its own size, so a program done with a million 24-byte strings that goes on to
+ * make 32-byte ones would otherwise touch fresh memory for all of them (k-nucleotide: its 12-mer
+ * keys, then its 18-mers). Before a chunk takes fresh memory, once enough has been taken since
+ * the last look, the free lists' blocks in the arena are marked on a bitmap (a bit per 8 bytes);
+ * every run of at least TV_SPAN_MIN free bytes leaves its lists and becomes a span. The next
+ * look waits for fresh memory in proportion to the blocks it walked, so a program whose free
+ * blocks lie between live ones pays for them once. */
+typedef struct tv_span { struct tv_span *next; size_t size; } tv_span;
+enum { TV_SPAN_MIN = 4096 };
+static tv_span *tv_spans;
+static char **tv_arenas;
+static size_t tv_narenas;
+static size_t tv_fresh, tv_spans_at = (size_t)4 << 20;
+
+static void tv_arena_add(char *a) {
+    tv_arenas = tv_realloc(tv_arenas, (tv_narenas + 1) * sizeof *tv_arenas);
+    tv_arenas[tv_narenas++] = a;
+}
+
+/* the arena block p lies in, or -1 */
+static inline ptrdiff_t tv_arena_of(const char *p, size_t *hint) {
+    size_t i = *hint;
+    if (i < tv_narenas && p >= tv_arenas[i] && p < tv_arenas[i] + TV_ARENA_BLOCK) return (ptrdiff_t)i;
+    for (i = 0; i < tv_narenas; i++)
+        if (p >= tv_arenas[i] && p < tv_arenas[i] + TV_ARENA_BLOCK) { *hint = i; return (ptrdiff_t)i; }
+    return -1;
+}
+
+/* the first bit at or after i that is `set`, or n */
+static size_t tv_bits_next(const uint64_t *w, size_t i, size_t n, bool set) {
+    while (i < n) {
+        uint64_t x = set ? w[i >> 6] : ~w[i >> 6];
+        x &= ~(uint64_t)0 << (i & 63);
+        if (x) {
+            i = (i & ~(size_t)63) + (size_t)__builtin_ctzll(x);
+            return i < n ? i : n;
+        }
+        i = (i & ~(size_t)63) + 64;
+    }
+    return n;
+}
+
+static bool tv_spans_make(void) {
+    enum { UNITS = TV_ARENA_BLOCK / 8 };
+    size_t walked = 0, freeb = 0, hint = 0;
+    for (size_t c = 1; c < TV_SMALL_CLASSES; c++)
+        for (void **b = tv_small_bins[c]; b; b = *b) { walked++; freeb += c * 8; }
+    tv_spans_at = tv_fresh + (walked * 32 > ((size_t)1 << 20) ? walked * 32 : ((size_t)1 << 20));
+    if (freeb < 4 * TV_SPAN_MIN || !tv_narenas) return false;
+    size_t mapped = tv_narenas * (UNITS / 8);
+    uint64_t *bits = mmap(NULL, mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (bits == MAP_FAILED) return false;
+    for (size_t c = 1; c < TV_SMALL_CLASSES; c++)
+        for (void **b = tv_small_bins[c]; b; b = *b) {
+            ptrdiff_t a = tv_arena_of((char *)b, &hint);
+            if (a < 0) continue;
+            size_t u = (size_t)a * UNITS + (size_t)((char *)b - tv_arenas[a]) / 8, e = u + c;
+            for (; u < e; u++) bits[u >> 6] |= (uint64_t)1 << (u & 63);
+        }
+    /* (runs too short to be spans are cleared: the bits left mark the blocks that leave their lists) */
+    bool made = false;
+    for (size_t a = 0; a < tv_narenas; a++) {
+        uint64_t *w = bits + a * (UNITS / 64);
+        size_t i = 0;
+        tv_span **tail = &tv_spans;
+        while (*tail) tail = &(*tail)->next;
+        while ((i = tv_bits_next(w, i, UNITS, true)) < UNITS) {
+            size_t e = tv_bits_next(w, i, UNITS, false);
+            if ((e - i) * 8 >= TV_SPAN_MIN) {
+                tv_span *s = (tv_span *)(void *)(tv_arenas[a] + i * 8);
+                s->size = (e - i) * 8;
+                s->next = NULL;
+                *tail = s;
+                tail = &s->next;
+                made = true;
+            } else {
+                for (size_t u = i; u < e; u++) w[u >> 6] &= ~((uint64_t)1 << (u & 63));
+            }
+            i = e;
+        }
+    }
+    if (made)
+        for (size_t c = 1; c < TV_SMALL_CLASSES; c++)
+            for (void **pp = (void **)&tv_small_bins[c]; *pp;) {
+                char *b = *pp;
+                ptrdiff_t a = tv_arena_of(b, &hint);
+                size_t u = a < 0 ? 0 : (size_t)a * UNITS + (size_t)(b - tv_arenas[a]) / 8;
+                if (a >= 0 && (bits[u >> 6] >> (u & 63) & 1)) *pp = *(void **)b;
+                else pp = (void **)b;
+            }
+    munmap(bits, mapped);
+    return made;
+}
+
+/* blocks of sz for k, up to `bytes` of them, from the first span with room for one */
+static void *tv_span_take(tv_class_space *k, size_t sz, size_t bytes) {
+    for (tv_span **pp = &tv_spans; *pp; pp = &(*pp)->next) {
+        tv_span *s = *pp;
+        char *end = (char *)s + s->size;
+        char *p = (char *)(((uintptr_t)s + 15) & ~(uintptr_t)15);
+        if ((size_t)(end - p) < sz) continue;
+        size_t take = (size_t)(end - p) >= bytes ? bytes : (size_t)(end - p) / sz * sz;
+        char *rest = (char *)(((uintptr_t)(p + take) + 15) & ~(uintptr_t)15);
+        tv_span *next = s->next;
+        if (rest < end && (size_t)(end - rest) >= sizeof(tv_span) + 64) {
+            tv_span *r = (tv_span *)(void *)rest;
+            r->size = (size_t)(end - rest);
+            r->next = next;
+            *pp = r;
+        } else {
+            *pp = next;
+        }
+        k->cur = p + sz;
+        k->lim = p + take;
+        return p;
+    }
+    return NULL;
+}
+
 static void *tv_carve(tv_class_space *k, size_t sz) {
     if (TV_LIKELY((size_t)(k->lim - k->cur) >= sz)) {
         char *p = k->cur;
@@ -707,17 +828,21 @@ static void *tv_carve(tv_class_space *k, size_t sz) {
     if (n == 0) n = 1;
     size_t bytes = n * sz;
     char *p;
+    if ((p = tv_span_take(k, sz, bytes)) != NULL) return p;
     if (tv_carved + bytes <= 65536) {
         p = tv_alloc(bytes);
         tv_carved += bytes;
     } else {
+        if (tv_fresh >= tv_spans_at && tv_spans_make() && (p = tv_span_take(k, sz, bytes)) != NULL) return p;
         if ((size_t)(tv_bump_end - tv_bump) < bytes) {
             tv_bump = tv_alloc(TV_ARENA_BLOCK);
             tv_bump_end = tv_bump + TV_ARENA_BLOCK;
+            tv_arena_add(tv_bump);
         }
         p = tv_bump;
         /* (rounded to 16, so the next chunk is as aligned as malloc's: tasks and promises need it) */
         tv_bump += (bytes + 15) & ~(size_t)15;
+        tv_fresh += bytes;
     }
     k->cur = p + sz;
     k->lim = p + bytes;

@@ -2611,6 +2611,51 @@ static void test_async(void) {
     CHECK(all_dead());
 }
 
+/* A program done with many small strings of one size, going on to make strings of another: the
+ * freed blocks are carved again (tv_spans_make), and nothing made from them overlaps. */
+static void test_small_spans(void) {
+    enum { N = 400000 };
+    tv_str *a = malloc(N * sizeof *a), *b = malloc(N * sizeof *b);
+    char buf[64];
+    uintptr_t lo = UINTPTR_MAX, hi = 0;
+    for (int i = 0; i < N; i++) {
+        int n = snprintf(buf, sizeof buf, "k%011d", i);
+        a[i] = tv_str_from(buf, (size_t)n);
+        uintptr_t p = (uintptr_t)a[i].p;
+        if (p < lo) lo = p;
+        if (p > hi) hi = p;
+    }
+    for (int i = 0; i < N; i++) tv_str_release(a[i]);
+    int inside = 0;
+    for (int i = 0; i < N; i++) {
+        int n = snprintf(buf, sizeof buf, "longer-key-%013d", i);
+        b[i] = tv_str_from(buf, (size_t)n);
+        uintptr_t p = (uintptr_t)b[i].p;
+        inside += p >= lo && p <= hi;
+    }
+    /* (every other one freed, and the first size made again between the rest) */
+    for (int i = 0; i < N; i += 2) tv_str_release(b[i]);
+    for (int i = 0; i < N; i += 2) {
+        int n = snprintf(buf, sizeof buf, "k%011d", i);
+        a[i] = tv_str_from(buf, (size_t)n);
+    }
+    bool ok = true;
+    for (int i = 0; i < N; i++) {
+        int n = i % 2 ? snprintf(buf, sizeof buf, "longer-key-%013d", i) : snprintf(buf, sizeof buf, "k%011d", i);
+        tv_str s = i % 2 ? b[i] : a[i];
+        ok = ok && s.p->len == n && memcmp(s.p->data, buf, (size_t)n) == 0;
+        tv_str_release(s);
+    }
+    CHECK(ok);
+#if !(defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer)))
+    CHECK(inside > N / 2);
+#else
+    (void)inside;
+#endif
+    free(a);
+    free(b);
+}
+
 int main(int argc, char **argv) {
     tv_init(argc, argv);
     if (argc > 1 && strcmp(argv[1], "trap") == 0) { /* used by test.sh to check the exit status */
@@ -2633,6 +2678,7 @@ int main(int argc, char **argv) {
     test_math_misc();
     test_processes();
     test_async();
+    test_small_spans();
     tv_sb_free(&alog);
     tv_sb_free(&tv_test_msg);
     CHECK(all_dead());
