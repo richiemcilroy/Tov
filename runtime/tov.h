@@ -643,6 +643,9 @@ static inline void tv_arrbuf_free(tv_arrbuf *p, size_t es) {
 #endif
     tv_arrbuf_free_block(p, es);
 }
+/* Release of an array of plain values (numbers, booleans) of `es` bytes each: freed inline, as
+ * the free functions below free theirs, not through the descriptor's out-of-line path. */
+static inline void tv_arr_release_plain(tv_arr a, size_t es) { if (a.p && a.p->rc > 0 && --a.p->rc == 0) tv_arrbuf_free(a.p, es); }
 /* Release with the array type's own free function (generated code: see arr_free_fn). */
 static inline void tv_arr_release_with(tv_arr a, void (*fr)(tv_arrbuf *)) { if (a.p && a.p->rc > 0 && --a.p->rc == 0) fr(a.p); }
 static inline void tv_arr_release(tv_arr a, const tv_type *t) { if (a.p && a.p->rc > 0 && --a.p->rc == 0) tv_arrbuf_release_slow(a.p, t); }

@@ -1775,6 +1775,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let f = self.arr_free_fn(t, e);
                 format!("tv_arr_release_with({place}, {f})")
             }
+            // (numbers and booleans: freed inline)
+            Ty::Array(e) if matches!(self.tget(e), Ty::Int | Ty::F64 | Ty::F32 | Ty::Bool | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64) => {
+                let ect = self.ctype(e);
+                format!("tv_arr_release_plain({place}, sizeof({ect}))")
+            }
             Ty::Array(e) => {
                 let d = self.desc(e);
                 format!("tv_arr_release({place}, {d})")
