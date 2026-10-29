@@ -7054,6 +7054,30 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let n = codes.len();
                     return self.tmp(STR, &format!("tv_str_concatn((tv_str[]){{{}}}, {n})", codes.join(", ")), true);
                 }
+                // (`"v" + k + i`, strings and numbers: each part's text into one builder, once
+                // the chain is a string from its first `+` on, as each `+` of it would)
+                let plain = |g: &Self, x: ExprId| {
+                    let t = g.facts(m).expr_ty.get(x as usize).copied().unwrap_or(ERROR);
+                    matches!(g.tget(t), Ty::Str | Ty::StrLit(_) | Ty::Int | Ty::F64 | Ty::Bool)
+                };
+                if parts.len() >= 3 && parts.iter().all(|&x| plain(self, x)) {
+                    let mut vals = Vec::new();
+                    for (k, &x) in parts.iter().enumerate() {
+                        let v = if k + 1 < parts.len() { self.expr_before(x, &parts[k + 1..]) } else { self.expr(x) };
+                        vals.push(v);
+                    }
+                    let sbv = self.fresh("sb");
+                    let stack = self.stack_builder(&sbv);
+                    if stack.is_none() {
+                        self.open("{");
+                    }
+                    self.line(format!("tv_sb *sb = &{sbv};"));
+                    for v in vals {
+                        let c = self.string_code(v.ty, &v.code);
+                        self.line(format!("{c};"));
+                    }
+                    return self.end_builder(&sbv, stack);
+                }
                 let lv = self.expr_before(l, &[r]);
                 let rv = self.expr(r);
                 if lv.ty == STR && rv.ty == STR {
