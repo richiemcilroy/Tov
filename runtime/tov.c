@@ -8801,7 +8801,7 @@ tv_promise *tv_promise_new(const tv_type *vt) {
 void tv_promise_release_slow(tv_promise *p) {
     if (p->state == TV_FULFILLED && p->vt && p->vt->release) p->vt->release(p->value);
     if (p->state == TV_REJECTED && p->err && tv_err_release) tv_err_release(p->err);
-    tv_free(p->more);
+    if (p->more != &p->one) tv_free(p->more);
     tv_async_free(p, sizeof(tv_promise) + (p->vt ? p->vt->size : 0));
 }
 
@@ -8822,8 +8822,16 @@ static void tv_promise_react(tv_promise *p, void (*fn)(void *, void *), void *a,
         return;
     }
     if (p->nmore == p->capmore) {
-        p->capmore = p->capmore ? p->capmore * 2 : 4;
-        p->more = tv_realloc(p->more, (size_t)p->capmore * sizeof *p->more);
+        if (!p->capmore) {
+            p->more = &p->one;
+            p->capmore = 1;
+        } else {
+            tv_reaction *more = tv_alloc((size_t)p->capmore * 4 * sizeof *more);
+            memcpy(more, p->more, (size_t)p->nmore * sizeof *more);
+            if (p->more != &p->one) tv_free(p->more);
+            p->more = more;
+            p->capmore *= 4;
+        }
     }
     p->more[p->nmore++] = (tv_reaction){fn, a, b};
 }

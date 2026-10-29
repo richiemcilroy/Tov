@@ -1088,8 +1088,9 @@ typedef struct tv_promise {
     const tv_type *vt;        /* the value's type */
     void *err;                /* rejection: an Error object (owned) */
     tv_task *waiter;          /* the task waiting for it, when that's the first and only reaction */
-    tv_reaction *more;        /* other reactions, in the order they were added */
+    tv_reaction *more;        /* other reactions, in the order they were added (`one` until a second) */
     int32_t nmore, capmore;
+    tv_reaction one;
     _Alignas(16) unsigned char value[];
 } tv_promise;
 
