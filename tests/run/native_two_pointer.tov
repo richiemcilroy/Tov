@@ -12,6 +12,33 @@ function reverse(inout xs: int[]) {
   }
 }
 
+// a part of xs reversed in place: spans either side of the short copy's 8 (see Gen's While)
+function reverseRange(inout xs: int[], from: int, to: int) {
+  let i = from
+  let j = to
+  while (i < j) {
+    const t = xs[i]!
+    xs[i] = xs[j]!
+    xs[j] = t
+    i++
+    j--
+  }
+}
+
+// stops at the first pair that differs: a `break` out of the short copy
+function mirrored(xs: int[], from: int, to: int): int {
+  let i = from
+  let j = to
+  let pairs = 0
+  while (i < j) {
+    if (xs[i]! !== xs[j]!) break
+    pairs += 1
+    i++
+    j--
+  }
+  return pairs
+}
+
 function isPalindrome(s: u8[]): bool {
   let lo = 0
   let hi = s.length - 1
@@ -39,4 +66,14 @@ function main() {
   const b = a.slice()
   reverse(&a)
   console.log(a.join(","), b.join(","))
+  for (const span of [0, 1, 2, 6, 7, 8, 9, 15, 16, 17]) {
+    let ys: int[] = []
+    for (let k = 0; k < 20; k++) ys.push(k)
+    reverseRange(&ys, 2, 2 + span)
+    console.log(span, ys.join(","))
+  }
+  const sym = [1, 2, 3, 4, 5, 9, 5, 4, 3, 2, 1]
+  console.log(mirrored(sym, 0, 10), mirrored(sym, 1, 9), mirrored(sym, 0, 9), mirrored(sym, 3, 7))
+  const long = [1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 8, 7, 6, 5, 4, 3, 2, 1]
+  console.log(mirrored(long, 0, 17), mirrored(long, 0, 16))
 }

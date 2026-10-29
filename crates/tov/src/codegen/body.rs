@@ -3936,12 +3936,34 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                     self.b().versioned.push((vec![*up, *down], ptrs));
                     self.b().nowrap_locals.extend([*up, *down]);
+                    // Under 8 apart (a short reversal): a copy LLVM unrolls whole, told what it
+                    // can't work out from `i < j` with both moving, that `i` stays under i0 + 4
+                    // (both step every round, no `continue` skipping one). fannkuch's flips:
+                    // 1.56 s to 1.46 on an M-series Mac, 2.00 to 1.87 on x86 (16 apart: 1.53, 1.85).
+                    let short = !stmt_has_continue(self.ast(m), *body);
+                    if short {
+                        let i0 = self.fresh("i0");
+                        self.line(format!("tv_int {i0} = {i};"));
+                        self.open(&format!("if ((uint64_t){j} - (uint64_t){i} < 8) {{"));
+                        let cont = self.fresh("cont");
+                        self.open("for (;;) {");
+                        self.cond_break(*c);
+                        self.line(format!("if (!({i} - {i0} < 4)) break;"));
+                        self.loop_body(*body, &cont);
+                        self.line(format!("{cont}:;"));
+                        self.close("}");
+                        self.close("} else {");
+                        self.b().indent += 1;
+                    }
                     let cont = self.fresh("cont");
                     self.open("for (;;) {");
                     self.cond_break(*c);
                     self.loop_body(*body, &cont);
                     self.line(format!("{cont}:;"));
                     self.close("}");
+                    if short {
+                        self.close("}");
+                    }
                     let n = self.b().nowrap_locals.len();
                     self.b().nowrap_locals.truncate(n - 2);
                     self.b().versioned.pop();
@@ -10561,6 +10583,19 @@ pub(crate) fn collect_exprs_stmt(ast: &ast::Ast, s: StmtId, out: &mut Vec<ExprId
             }
         }
         _ => {}
+    }
+}
+
+/// A `continue` in `s` (outside closures), for the loop `s` is the body of or one inside it.
+fn stmt_has_continue(ast: &ast::Ast, s: StmtId) -> bool {
+    match &ast.stmt(s).kind {
+        StmtKind::Continue(_) => true,
+        StmtKind::For { body: b, .. } | StmtKind::ForOf { body: b, .. } | StmtKind::While(_, b) | StmtKind::DoWhile(b, _) => stmt_has_continue(ast, *b),
+        StmtKind::If(_, t, e) => stmt_has_continue(ast, *t) || e.is_some_and(|e| stmt_has_continue(ast, e)),
+        StmtKind::Block(xs) => xs.iter().any(|&x| stmt_has_continue(ast, x)),
+        StmtKind::Switch(_, cases) => cases.iter().any(|c| c.body.iter().any(|&x| stmt_has_continue(ast, x))),
+        StmtKind::Try { body, catch, finally } => stmt_has_continue(ast, *body) || catch.as_ref().is_some_and(|c| stmt_has_continue(ast, c.body)) || finally.is_some_and(|f| stmt_has_continue(ast, f)),
+        _ => false,
     }
 }
 
