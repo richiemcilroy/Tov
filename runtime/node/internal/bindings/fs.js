@@ -6,7 +6,8 @@
 //   undefined          synchronous: return the result or throw
 //   an FSReqCallback   call req.oncomplete(err, result) on a later loop turn
 //   kUsePromises       return a promise, settled on a later loop turn
-// (Callbacks and promises complete on the next turn; the work itself runs synchronously for now.)
+// (Callbacks and promises complete on the next turn; reads and writes into buffers run on the
+// runtime's I/O threads meanwhile, the rest synchronously.)
 
 const native = globalThis.__tov_native?.fs;
 
@@ -62,6 +63,28 @@ function run(req, fn) {
     req.oncomplete(null, result);
   });
   return undefined;
+}
+
+// A read or write with a callback or promise: on one of the runtime's I/O threads, as Node.js's
+// pool does it, the loop going on meanwhile (a download writing each chunk where it goes would
+// otherwise spend the loop in pwrite); `sync` when no thread can start
+function io(req, write, fd, buffer, offset, length, pos, sync) {
+  if (req === undefined || req === null || typeof native?.io !== 'function') return run(req, sync);
+  let resolve, reject;
+  const promise = req === kUsePromises ? new Promise((ok, no) => { resolve = ok; reject = no; }) : undefined;
+  const done = (err, n) => {
+    if (req !== kUsePromises) req.oncomplete(err, n);
+    else if (err) reject(err);
+    else resolve(n);
+  };
+  let started;
+  try {
+    started = native.io(write, fd, buffer, offset, length, position(pos), done);
+  } catch (e) {
+    // (a bad argument: reported as the synchronous call reports it, on a later turn)
+    return run(req, () => { throw e; });
+  }
+  return started ? promise : run(req, sync);
 }
 
 // Older call sites pass a ctx object to fill instead of throwing
@@ -154,7 +177,7 @@ module.exports = {
   open: (path, flags, mode, req) => run(req, () => fs().open(pathOf(path), flags, mode)),
   openFileHandle: (path, flags, mode, req) => run(req, () => new FileHandle(fs().open(pathOf(path), flags, mode))),
   close: (fd, req) => run(req, () => fs().close(fd)),
-  read: (fd, buffer, offset, length, pos, req) => run(req, () => fs().read(fd, buffer, offset, length, position(pos))),
+  read: (fd, buffer, offset, length, pos, req) => io(req, false, fd, buffer, offset, length, pos, () => fs().read(fd, buffer, offset, length, position(pos))),
   readBuffers: (fd, buffers, pos, req) => run(req, () => {
     let total = 0;
     let p = position(pos);
@@ -167,7 +190,7 @@ module.exports = {
     return total;
   }),
   writeBuffer: (fd, buffer, offset, length, pos, req, ctx) =>
-    withCtx(ctx, () => run(req, () => fs().write(fd, buffer, offset, length, position(pos)))),
+    withCtx(ctx, () => io(req, true, fd, buffer, offset, length, pos, () => fs().write(fd, buffer, offset, length, position(pos)))),
   writeBuffers: (fd, buffers, pos, req, ctx) => withCtx(ctx, () => run(req, () => writeAll(fd, buffers, position(pos)))),
   writeString: (fd, string, pos, encoding, req, ctx) => withCtx(ctx, () => run(req, () => {
     Buffer ??= require('buffer').Buffer;

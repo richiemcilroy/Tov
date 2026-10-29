@@ -1103,6 +1103,62 @@ NATIVE(n_fs_write) {
     }
 }
 
+static void tv_node_call_args(JSObjectRef fn, size_t n, const JSValueRef *args);
+
+/* (an I/O thread's read or write: the buffer and callback held till it's done) */
+typedef struct {
+    JSValueRef buffer;
+    JSObjectRef cb;
+    bool write;
+} tv_node_fio;
+
+static void tv_node_fio_done(void *arg, long n, int err) {
+    tv_node_fio *f = arg;
+    JSContextRef ctx = tv_js_ctx;
+    JSValueRef args[2];
+    if (n < 0) {
+        JSValueRef e = NULL;
+        tv_node_throw(ctx, &e, err, f->write ? "write" : "read", NULL, NULL);
+        args[0] = e;
+        args[1] = JSValueMakeUndefined(ctx);
+    } else {
+        args[0] = JSValueMakeNull(ctx);
+        args[1] = JSValueMakeNumber(ctx, (double)n);
+    }
+    JSObjectRef cb = f->cb;
+    JSValueUnprotect(ctx, f->buffer);
+    free(f);
+    tv_node_call_args(cb, 2, args);
+    JSValueUnprotect(ctx, cb);
+}
+
+/* io(write, fd, buffer, offset, length, position, cb(err, bytes)): read or write on one of the
+ * runtime's I/O threads; false when none could start (the caller does it synchronously) */
+NATIVE(n_fs_io) {
+    UNUSED;
+    if (n < 7 || !JSValueIsObject(ctx, a[6])) return JSValueMakeBoolean(ctx, false);
+    bool write = JSValueToBoolean(ctx, a[0]);
+    int fd = (int)arg_num(ctx, n, a, 1, -1);
+    uint8_t *p;
+    size_t len;
+    if (!tv_js_bytes_view(a[2], &p, &len)) return tv_node_throw(ctx, exc, EINVAL, write ? "write" : "read", NULL, NULL);
+    size_t off = (size_t)arg_num(ctx, n, a, 3, 0), want = (size_t)arg_num(ctx, n, a, 4, (double)len);
+    double pos = arg_num(ctx, n, a, 5, -1);
+    if (off > len) off = len;
+    if (want > len - off) want = len - off;
+    tv_node_fio *f = malloc(sizeof *f);
+    *f = (tv_node_fio){ a[2], (JSObjectRef)a[6], write };
+    JSValueProtect(ctx, f->buffer);
+    JSValueProtect(ctx, f->cb);
+    if (!tv_fio_submit(fd, write, p + off, want, pos >= 0 ? (int64_t)pos : -1, tv_node_fio_done, f)) {
+        JSValueUnprotect(ctx, f->buffer);
+        JSValueUnprotect(ctx, f->cb);
+        free(f);
+        return JSValueMakeBoolean(ctx, false);
+    }
+    return JSValueMakeBoolean(ctx, true);
+}
+
 /* Node.js's 18 stat fields: dev, mode, nlink, uid, gid, rdev, blksize, ino, size, blocks, then
  * atime, mtime, ctime and birthtime as (seconds, nanoseconds) */
 static JSValueRef tv_node_stat_array(JSContextRef ctx, const struct stat *st) {
@@ -1660,6 +1716,7 @@ void tv_node_fs_install(JSContextRef ctx, JSObjectRef native) {
     tv_js_def(ctx, fs, "close", n_fs_close);
     tv_js_def(ctx, fs, "read", n_fs_read);
     tv_js_def(ctx, fs, "write", n_fs_write);
+    tv_js_def(ctx, fs, "io", n_fs_io);
     tv_js_def(ctx, fs, "stat", n_fs_stat);
     tv_js_def(ctx, fs, "lstat", n_fs_lstat);
     tv_js_def(ctx, fs, "fstat", n_fs_fstat);

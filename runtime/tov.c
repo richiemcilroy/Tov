@@ -13120,6 +13120,7 @@ static void tv_fc_spare(tv_fc *old, tv_fr *r) {
 
 /* The loop: spares the helper opened, into their origins' pools (or let go). */
 static bool tv_bk_finish_all(void);
+static bool tv_fio_finish_all(void);
 
 static void tv_sk_ready(tv_io *h, bool readable, bool writable, bool broken) {
     (void)h; (void)readable; (void)writable; (void)broken;
@@ -13129,7 +13130,9 @@ static void tv_sk_ready(tv_io *h, bool readable, bool writable, bool broken) {
     (void)rd;
 #endif
     /* (bodies a thread received are the program's work; spares opened, housekeeping) */
-    if (!tv_bk_finish_all()) tv_io_quiet = true;
+    bool bodies = tv_bk_finish_all();
+    bool files = tv_fio_finish_all();
+    if (!bodies && !files) tv_io_quiet = true;
     pthread_mutex_lock(&tv_sk_mu);
     tv_fc *done = tv_sk_dialed;
     tv_sk_dialed = NULL;
@@ -13592,6 +13595,120 @@ static bool tv_bk_finish_all(void) {
         tv_bk *j = done;
         done = j->next;
         tv_bk_finish(j);
+    }
+    return true;
+}
+
+/* ---- file reads and writes, on threads
+
+   Node.js's fs callbacks and promises (FileHandle.write, fs.read, ...) do their I/O on threads,
+   as libuv's pool does: the loop goes on receiving and decrypting meanwhile. A download writing
+   each chunk where it goes (Cap's media server: 32 ranges of a 418 MB file from S3) otherwise
+   spends its one thread in pwrite between reads. The jobs run in the order given; their
+   completions come back to the loop (tv_fio_finish_all), which calls each job's `done`. */
+#define TV_FIO_THREADS 4
+typedef struct tv_fio {
+    int fd;
+    bool write;
+    uint8_t *p;
+    size_t len;
+    int64_t pos;          /* < 0: at the file's offset */
+    long n;               /* bytes done, or -1 (err) */
+    int err;
+    void (*done)(void *arg, long n, int err);
+    void *arg;
+    struct tv_fio *next;
+} tv_fio;
+static pthread_mutex_t tv_fio_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t tv_fio_cv = PTHREAD_COND_INITIALIZER;
+static tv_fio *tv_fio_head, *tv_fio_tail, *tv_fio_done;
+static int tv_fio_threads, tv_fio_idle;
+
+static void *tv_fio_run(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&tv_fio_mu);
+    for (;;) {
+        while (!tv_fio_head) {
+            tv_fio_idle++;
+            pthread_cond_wait(&tv_fio_cv, &tv_fio_mu);
+            tv_fio_idle--;
+        }
+        tv_fio *j = tv_fio_head;
+        tv_fio_head = j->next;
+        if (!tv_fio_head) tv_fio_tail = NULL;
+        pthread_mutex_unlock(&tv_fio_mu);
+        for (;;) {
+            ssize_t r = j->write ? (j->pos >= 0 ? pwrite(j->fd, j->p, j->len, (off_t)j->pos) : write(j->fd, j->p, j->len))
+                                 : (j->pos >= 0 ? pread(j->fd, j->p, j->len, (off_t)j->pos) : read(j->fd, j->p, j->len));
+            if (r < 0 && errno == EINTR) continue;
+            j->n = (long)r;
+            j->err = r < 0 ? errno : 0;
+            break;
+        }
+        pthread_mutex_lock(&tv_fio_mu);
+        bool poke = !tv_fio_done;
+        j->next = tv_fio_done;
+        tv_fio_done = j;
+        if (poke) {
+            pthread_mutex_unlock(&tv_fio_mu);
+            tv_sk_wake_loop();
+            pthread_mutex_lock(&tv_fio_mu);
+        }
+    }
+    return NULL;
+}
+
+bool tv_fio_submit(int fd, bool write, void *p, size_t len, int64_t pos, void (*done)(void *arg, long n, int err), void *arg) {
+    if (!tv_sk_start()) return false;
+    pthread_mutex_lock(&tv_fio_mu);
+    if (tv_fio_idle == 0 && tv_fio_threads < TV_FIO_THREADS) {
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setstacksize(&attr, 64 * 1024 > PTHREAD_STACK_MIN ? 64 * 1024 : PTHREAD_STACK_MIN);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        pthread_t t;
+        bool ok = pthread_create(&t, &attr, tv_fio_run, NULL) == 0;
+        pthread_attr_destroy(&attr);
+        if (ok) tv_fio_threads++;
+        else if (tv_fio_threads == 0) {
+            pthread_mutex_unlock(&tv_fio_mu);
+            return false;
+        }
+    }
+    tv_fio *j = tv_alloc(sizeof *j);
+    *j = (tv_fio){ .fd = fd, .write = write, .p = p, .len = len, .pos = pos, .done = done, .arg = arg };
+    if (tv_fio_tail) tv_fio_tail->next = j;
+    else tv_fio_head = j;
+    tv_fio_tail = j;
+    /* (the loop waits for its completion) */
+    tv_io_refs++;
+    pthread_cond_signal(&tv_fio_cv);
+    pthread_mutex_unlock(&tv_fio_mu);
+    return true;
+}
+
+/* (on the loop; false if none were done) */
+static bool tv_fio_finish_all(void) {
+    if (!tv_fio_threads) return false;
+    pthread_mutex_lock(&tv_fio_mu);
+    tv_fio *done = tv_fio_done;
+    tv_fio_done = NULL;
+    pthread_mutex_unlock(&tv_fio_mu);
+    if (!done) return false;
+    /* (in the order they finished: the list is newest first) */
+    tv_fio *order = NULL;
+    while (done) {
+        tv_fio *j = done;
+        done = j->next;
+        j->next = order;
+        order = j;
+    }
+    while (order) {
+        tv_fio *j = order;
+        order = j->next;
+        tv_io_refs--;
+        j->done(j->arg, j->n, j->err);
+        tv_free(j);
     }
     return true;
 }

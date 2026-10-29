@@ -1157,6 +1157,10 @@ tv_int tv_set_timer(tv_fn callback, double ms, bool repeat);   /* setTimeout/set
 typedef struct tv_io tv_io;
 struct tv_io { void (*ready)(tv_io *h, bool readable, bool writable, bool broken); };
 extern int tv_io_refs;
+/* A file read or write on one of the runtime's I/O threads (Node.js's fs callbacks and promises):
+ * `done(arg, bytes or -1, errno)` is called on the loop when it's done; false if no thread could
+ * start (do it here). The buffer must stay until then. */
+bool tv_fio_submit(int fd, bool write, void *p, size_t len, int64_t pos, void (*done)(void *arg, long n, int err), void *arg);
 void tv_io_add(int fd, tv_io *h, bool read, bool write);
 /* changes what a watched fd waits for; neither stops watching it (closing the fd ends it too) */
 void tv_io_set(int fd, tv_io *h, bool read, bool write);
