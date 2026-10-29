@@ -1,0 +1,21 @@
+// A million calls deep, and a million-long linked list freed: the program's stack has room for
+// both (on Linux, a stack of its own on the main thread; elsewhere a thread's or the main one).
+
+type Node = { value: int, next: Node | undefined }
+
+function depth(n: int, path: int[]): int {
+  if (n === 0) return path.length
+  path.push(n)
+  const below = depth(n - 1, path)
+  path.pop()
+  return below
+}
+
+function main() {
+  console.log(depth(1_000_000, []))
+  let list: Node | undefined = undefined
+  for (let i = 0; i < 1_000_000; i++) list = { value: i, next: list }
+  console.log(list!.value)
+  list = undefined
+  console.log("freed")
+}

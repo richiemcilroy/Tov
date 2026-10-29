@@ -1204,6 +1204,17 @@ int tv_test_summary(void);   /* prints "<n> passed, <m> failed"; returns exit st
 
 /* Called by the generated main() before anything else. Stores argc/argv below. */
 void tv_init(int argc, char **argv);
+/* Linux: a program runs on a stack of its own on the main thread rather than on a thread of its
+ * own (see tv_run_on_stack). Not under a sanitizer, which tracks the stack it started on. */
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+#define TV_SANITIZED 1
+#endif
+#endif
+#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__)) && !defined(TV_SANITIZED) && !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__)
+#define TV_STACK_SWITCH 1
+bool tv_run_on_stack(int (*fn)(void), size_t size, int *status);
+#endif
 extern int tv_argc;
 extern char **tv_argv;
 

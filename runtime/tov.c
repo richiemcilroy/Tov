@@ -7164,6 +7164,41 @@ int tv_test_summary(void) {
 
 /* ================================================================== init */
 
+#ifdef TV_STACK_SWITCH
+/* The program on a stack of `size` (reserved, committed as it's used, a guard page below it)
+ * on the main thread: as roomy as a thread of its own, without starting one. Creating a thread
+ * touches ~190 KB of libc's pages that a C program's start doesn't, and gives the thread a malloc
+ * arena of its own. false if the stack can't be mapped (the caller starts a thread instead).
+ * tv_stack_call(top, fn) calls fn with the stack pointer at top (16-byte aligned) and puts the
+ * old one back after, kept in a callee-saved register. */
+void tv_stack_call(void *top, void (*fn)(void));
+#if defined(__x86_64__)
+__asm__(".text\n.globl tv_stack_call\n.type tv_stack_call,@function\ntv_stack_call:\n"
+        "  pushq %rbx\n  movq %rsp, %rbx\n  andq $-16, %rdi\n  movq %rdi, %rsp\n  callq *%rsi\n"
+        "  movq %rbx, %rsp\n  popq %rbx\n  ret\n.size tv_stack_call, .-tv_stack_call\n");
+#else
+__asm__(".text\n.globl tv_stack_call\n.type tv_stack_call,%function\ntv_stack_call:\n"
+        "  stp x29, x30, [sp, #-16]!\n  mov x29, sp\n  and x0, x0, #-16\n  mov sp, x0\n  blr x1\n"
+        "  mov sp, x29\n  ldp x29, x30, [sp], #16\n  ret\n.size tv_stack_call, .-tv_stack_call\n");
+#endif
+static int (*tv_stack_fn)(void);
+static int tv_stack_status;
+static void tv_stack_entry(void) { tv_stack_status = tv_stack_fn(); }
+
+bool tv_run_on_stack(int (*fn)(void), size_t size, int *status) {
+    char *s = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_STACK, -1, 0);
+    if (s == MAP_FAILED) return false;
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    /* (no huge pages: a stack's first touch would be 2 MB of memory) */
+    madvise(s, size, MADV_NOHUGEPAGE);
+    mprotect(s, page, PROT_NONE);
+    tv_stack_fn = fn;
+    tv_stack_call(s + size, tv_stack_entry);
+    *status = tv_stack_status;
+    return true;
+}
+#endif
+
 void tv_init(int argc, char **argv) {
     static bool initialized;
     tv_argc = argc;
