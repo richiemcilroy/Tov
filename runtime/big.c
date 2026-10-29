@@ -300,6 +300,7 @@ static void tv_mag_rsub(tv_limb *x, uint32_t xn, const tv_limb *y, uint32_t yn) 
  * added (or subtracted) along a chain of its own. About twice as fast as a limb at a time, whose
  * carry goes through a 128-bit add at every step. */
 
+#if defined(__clang__)
 /* The products of a[0..4) and m as four limbs plus a high carry: p[0..4) + (c_in) */
 #define TV_MUL4(a, m, c, s0, s1, s2, s3)                                                  \
     do {                                                                                  \
@@ -323,6 +324,39 @@ static void tv_mag_rsub(tv_limb *x, uint32_t xn, const tv_limb *y, uint32_t yn) 
         for (int j_ = 1; j_ < 8; j_++) (o)[j_] = __builtin_addcll((tv_limb)p_[j_], (tv_limb)(p_[j_ - 1] >> 64), k_, &k_); \
         (c) = (tv_limb)(p_[7] >> 64) + k_;                                                    \
     } while (0)
+#else
+/* GCC: each limb summed in 128 bits instead (low half, the previous product's high half, the
+ * carry: < 2^66), which it compiles to straight adds; through __builtin_addcll's chain it was
+ * 1.5x slower. (clang is ~1.6x slower this way.) */
+#define TV_MUL4(a, m, c, s0, s1, s2, s3)                                                  \
+    do {                                                                                  \
+        tv_dlimb p0_ = (tv_dlimb)(a)[0] * (m), p1_ = (tv_dlimb)(a)[1] * (m);              \
+        tv_dlimb p2_ = (tv_dlimb)(a)[2] * (m), p3_ = (tv_dlimb)(a)[3] * (m);              \
+        tv_dlimb s_ = (tv_dlimb)(tv_limb)p0_ + (c);                                       \
+        s0 = (tv_limb)s_;                                                                 \
+        s_ = (tv_dlimb)(tv_limb)p1_ + (tv_limb)(p0_ >> 64) + (tv_limb)(s_ >> 64);         \
+        s1 = (tv_limb)s_;                                                                 \
+        s_ = (tv_dlimb)(tv_limb)p2_ + (tv_limb)(p1_ >> 64) + (tv_limb)(s_ >> 64);         \
+        s2 = (tv_limb)s_;                                                                 \
+        s_ = (tv_dlimb)(tv_limb)p3_ + (tv_limb)(p2_ >> 64) + (tv_limb)(s_ >> 64);         \
+        s3 = (tv_limb)s_;                                                                 \
+        (c) = (tv_limb)(p3_ >> 64) + (tv_limb)(s_ >> 64);                                 \
+    } while (0)
+
+/* Eight products summed the same way: o[0..8) = a[0..8) * m + c, c = the high limb. */
+#define TV_MUL8(a, m, c, o)                                                                   \
+    do {                                                                                      \
+        tv_dlimb p_[8];                                                                       \
+        for (int j_ = 0; j_ < 8; j_++) p_[j_] = (tv_dlimb)(a)[j_] * (m);                      \
+        tv_dlimb s_ = (tv_dlimb)(tv_limb)p_[0] + (c);                                         \
+        (o)[0] = (tv_limb)s_;                                                                 \
+        for (int j_ = 1; j_ < 8; j_++) {                                                      \
+            s_ = (tv_dlimb)(tv_limb)p_[j_] + (tv_limb)(p_[j_ - 1] >> 64) + (tv_limb)(s_ >> 64); \
+            (o)[j_] = (tv_limb)s_;                                                            \
+        }                                                                                     \
+        (c) = (tv_limb)(p_[7] >> 64) + (tv_limb)(s_ >> 64);                                   \
+    } while (0)
+#endif
 
 /* r = a * m (r has n limbs, may be a); returns the high limb. */
 static tv_limb tv_mag_mul1(tv_limb *r, const tv_limb *a, uint32_t n, tv_limb m) {
