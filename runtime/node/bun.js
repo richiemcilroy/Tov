@@ -943,6 +943,26 @@ function onGone(id) {
   return true;
 }
 
+// A program's first fetch() and first streamed body load code later ones don't (the URL parser, web
+// streams and what they use: ~4 ms on an M4, ~20 ms on a cloud server's core), where Bun's are
+// built in: a server's first request (Cap's media server probing a video) waited on it. A server
+// loads it once it's been listening a moment instead, when nothing's waiting (an unref'd timer: a
+// program that's done by then doesn't wait for it)
+let warmed = false;
+function warmSoon() {
+  if (warmed) return;
+  warmed = true;
+  const t = setTimeout(() => {
+    try {
+      new URL('http://tov.invalid/a?b=1');
+      new AbortController();
+      const reader = new Response('x').body.getReader();
+      reader.read().then(() => reader.releaseLock(), () => {});
+    } catch {}
+  }, 50);
+  t.unref?.();
+}
+
 function serve(options) {
   if (options === null || typeof options !== 'object') throw new TypeError('Bun.serve expects an object');
   if (!http) throw notImplemented('Bun.serve outside Tov\'s runtime');
@@ -989,6 +1009,7 @@ class Server {
     this.port = http.port(id);
     this.development = options.development ?? process.env.NODE_ENV !== 'production';
     this.id = options.id ?? '';
+    warmSoon();
   }
 
   get url() {
