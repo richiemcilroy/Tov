@@ -549,9 +549,16 @@ static void tv_tls_set_io(tv_tls *t, void *io, long (*rd)(void *io, void *buf, s
     t->ahead.wr = wr;
 }
 
+/* (a server, idle a moment after it starts: its first HTTPS request reads ~140 roots otherwise) */
+static void tv_tls_warm(void) {
+    tv_tls_init();
+    tv_roots_load();
+    tv_tls_conf_for(true, NULL, 0);
+}
+
 static const tv_tls_ops tv_tls_table = {
     tv_tls_open, tv_tls_handshake, tv_tls_read, tv_tls_write, tv_tls_pending, tv_tls_why, tv_tls_close,
-    tv_tls_server, tv_tls_accept, tv_tls_verified, tv_tls_set_io,
+    tv_tls_server, tv_tls_accept, tv_tls_verified, tv_tls_set_io, tv_tls_warm,
 };
 
 void tv_tls_install(void) {

@@ -4054,6 +4054,14 @@ NATIVE(n_fetch_body_file) {
     return num(ctx, (double)(to - from));
 }
 
+/* warm: the TLS client's roots and context made now (a server's idle moment), not at its first
+ * HTTPS request */
+NATIVE(n_fetch_warm) {
+    UNUSED;
+    if (tv_tls_impl && tv_tls_impl->warm) tv_tls_impl->warm();
+    return undef(ctx);
+}
+
 /* tls: whether the program links Tov's TLS client (https works) */
 NATIVE(n_fetch_tls) {
     UNUSED;
@@ -4083,6 +4091,7 @@ static void tv_node_fetch_install(JSContextRef ctx, JSObjectRef native) {
     JSObjectRef f = JSObjectMake(ctx, NULL, NULL);
     tv_js_def(ctx, f, "start", n_fetch_start);
     tv_js_def(ctx, f, "bodyFile", n_fetch_body_file);
+    tv_js_def(ctx, f, "warm", n_fetch_warm);
     tv_js_def(ctx, f, "wait", n_fetch_wait);
     tv_js_def(ctx, f, "bodyWait", n_fetch_body_wait);
     tv_js_def(ctx, f, "read", n_fetch_read);

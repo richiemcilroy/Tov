@@ -954,6 +954,8 @@ function warmSoon() {
   warmed = true;
   const t = setTimeout(() => {
     try {
+      // (and the TLS client's roots: on a cloud server the first HTTPS request read them, ~20 ms)
+      globalThis.__tov_native?.fetch?.warm?.();
       new URL('http://tov.invalid/a?b=1');
       new AbortController();
       const reader = new Response('x').body.getReader();
