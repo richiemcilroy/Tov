@@ -377,6 +377,8 @@ function extractBody(init) {
   return [Buffer.from(`${init}`, 'utf8'), 'text/plain;charset=UTF-8', 'string'];
 }
 
+const kFilePart = Symbol.for('tov.filePart');
+
 // all of a body's bytes
 async function bodyBytes(body) {
   if (body === null) return new Uint8Array(0);
@@ -775,10 +777,19 @@ async function fetch(input, init = undefined) {
   }
   const headers = request[kHeaders];
   let body = request[kBody].body;
-  if (body !== null) {
+  // (a Bun.file: sent from the file a piece at a time, as Bun sends it, not read into memory first
+  // — a 400 MB upload otherwise held whole, then copied)
+  const part = body !== null && !request[kBody].stream ? body[kFilePart] : undefined;
+  let length;
+  if (part !== undefined) {
+    body = null;
+  } else if (body !== null) {
     body = await bodyBytes(request[kBody].stream ?? body);
+    length = body.byteLength;
   }
-  if (body !== null && !headers.has('content-length')) headers.set('content-length', `${body.byteLength}`);
+  // (the file named just before the request starts: nothing runs between)
+  if (part !== undefined) length = native.bodyFile(part.path, part.start, part.end);
+  if (length !== undefined && !headers.has('content-length')) headers.set('content-length', `${length}`);
   const redirect = s.redirect === 'manual' ? 1 : s.redirect === 'error' ? 2 : 0;
   const handle = native.start(s.method, s.url, headersWire(headers), body, redirect, 1, null, null, null);
   // (the signal can outlive the request by far, as AbortSignal.timeout's does: its listener holds

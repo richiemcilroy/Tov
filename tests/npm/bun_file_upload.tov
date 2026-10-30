@@ -1,0 +1,5 @@
+import run from "bun-file-upload"
+
+function main() {
+  try run()
+}

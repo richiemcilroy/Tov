@@ -1399,6 +1399,9 @@ void tv_http_run(void);   /* after the program: serves registered servers until 
 tv_str tv_native_headerRemove(tv_str block, tv_str name);  /* the block without `name` lines */
 tv_str tv_native_headerAppend(tv_str block, tv_str name, tv_str value);
 /* fetch(): see the HTTP client section of tov.c */
+/* The next fetchStart's body: `length` bytes of the open file `fd` from `offset`, read as they're
+ * sent (the request closes fd). */
+void tv_native_fetchBodyFile(int fd, int64_t offset, size_t length);
 tv_int tv_native_fetchStart(tv_str method, tv_str url, tv_str headers, tv_str body, tv_int redirect, tv_int flags, tv_str ca, tv_str unix_path, tv_str proxy);
 tv_promise *tv_native_fetchWait(tv_int id);    /* Promise<int>: 0 the head arrived, -1 failed, -2 aborted */
 tv_promise *tv_native_fetchBodyWait(tv_int id);   /* ... 0 the whole body is in */

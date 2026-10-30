@@ -11492,6 +11492,12 @@ typedef struct tv_fr {
     tv_sb head;                /* the serialized request head */
     bool merged;               /* the body was appended to head (one TLS record for both) */
     size_t sent;               /* bytes of head + body written */
+    /* a body sent from a file (Bun.file), read a piece at a time as it's sent: `fd` >= 0 */
+    int bfd;
+    int64_t boff;              /* where in the file it starts */
+    size_t blen;               /* its length */
+    char *bbuf;                /* a piece read: bytes [bat, bat + bbuf_len) of the body */
+    size_t bat, bbuf_len;
     tv_fc *c;
     bool retried;
     /* the response */
@@ -11522,6 +11528,9 @@ typedef struct tv_fr {
     char code_buf[64];
     tv_sb message;
 } tv_fr;
+static size_t tv_fr_body_len(const tv_fr *r);
+static size_t tv_fr_body_at(tv_fr *r, size_t at, const char **p);
+#define TV_FR_PIECE ((size_t)256 << 10)
 
 struct tv_fc {
     tv_io io;
@@ -11842,12 +11851,14 @@ static size_t tv_fr_out_len(const tv_fr *r);
 static bool tv_ur_write(tv_fc *c) {
     tv_fr *r = c->r;
     if (c->usend) return true;
-    size_t hn = r->head.len, bn = r->merged ? 0 : (size_t)r->body.p->len, total = hn + bn;
+    size_t hn = r->head.len, bn = r->merged ? 0 : tv_fr_body_len(r), total = hn + bn;
     if (r->sent >= total) { tv_ur_interest(c, true, false); return true; }
     if (c->uerr) return false;
     struct io_uring_sqe *s = tv_ur_sqe(c->ur);
     if (!s) return false;
     size_t n = total - r->sent;
+    /* (a file's body a piece at a time, not all of it copied at once) */
+    if (r->bfd >= 0 && n > TV_FR_PIECE) n = TV_FR_PIECE;
     if (c->uscap < n) {
         tv_free(c->usbuf);
         c->uscap = n < 1024 ? 1024 : n;
@@ -11856,7 +11867,15 @@ static bool tv_ur_write(tv_fc *c) {
     size_t o = 0;
     if (r->sent < hn) { memcpy(c->usbuf, r->head.data + r->sent, hn - r->sent); o = hn - r->sent; }
     size_t bo = r->sent > hn ? r->sent - hn : 0;
-    if (bn > bo) memcpy(c->usbuf + o, r->body.p->data + bo, bn - bo);
+    while (o < n) {
+        const char *bp;
+        size_t bl = tv_fr_body_at(r, bo, &bp);
+        if (bl == 0) return false;
+        if (bl > n - o) bl = n - o;
+        memcpy(c->usbuf + o, bp, bl);
+        o += bl;
+        bo += bl;
+    }
     c->uslen = n;
     s->opcode = IORING_OP_SEND;
     s->fd = c->fd;
@@ -12230,10 +12249,20 @@ static void tv_fr_resolve(tv_promise **pp, tv_int v) {
 
 /* The response is complete (0), or the request failed (< 0) — before the head arrived, or while
  * the body did. */
+/* A file's body: closed once the request's done with it. */
+static void tv_fr_drop_file(tv_fr *r) {
+    if (r->bfd >= 0) close(r->bfd);
+    r->bfd = -1;
+    tv_free(r->bbuf);
+    r->bbuf = NULL;
+    r->bbuf_len = 0;
+}
+
 static void tv_fr_settle(tv_fr *r, int result) {
     if (r->result != 1) return;
     r->result = result;
     tv_io_refs--;
+    tv_fr_drop_file(r);
     if (r->head_state == 1) {
         r->head_state = result;
         tv_fr_resolve(&r->done, result);
@@ -12491,10 +12520,10 @@ static bool tv_fr_prepare(tv_fr *r) {
     }
     const char *m = r->method.p->data;
     /* as Bun: every method but GET and HEAD says its length, even when it's 0 */
-    bool wants_length = r->body.p->len > 0 || (strcmp(m, "GET") != 0 && strcmp(m, "HEAD") != 0);
+    bool wants_length = tv_fr_body_len(r) > 0 || (strcmp(m, "GET") != 0 && strcmp(m, "HEAD") != 0);
     if (wants_length && !tv_hdr_has(r->headers, "content-length") && !tv_hdr_has(r->headers, "transfer-encoding")) {
         char cl[48];
-        int n = snprintf(cl, sizeof cl, "Content-Length: %d\r\n", (int)r->body.p->len);
+        int n = snprintf(cl, sizeof cl, "Content-Length: %zu\r\n", tv_fr_body_len(r));
         tv_sb_push(h, cl, (size_t)n);
     }
     tv_sb_push(h, "\r\n", 2);
@@ -12509,16 +12538,41 @@ static bool tv_fr_prepare(tv_fr *r) {
 
 /* ---- writing */
 
+/* The body's length: in memory, or a file's part. */
+static size_t tv_fr_body_len(const tv_fr *r) { return r->bfd >= 0 ? r->blen : (size_t)r->body.p->len; }
+
+/* The body's bytes from `at` on: *p and how many follow it there (a file's, read a piece at a
+   time; 0 when it can't be read: the request fails, as a short body would). */
+static size_t tv_fr_body_at(tv_fr *r, size_t at, const char **p) {
+    if (r->bfd < 0) {
+        *p = r->body.p->data + at;
+        return (size_t)r->body.p->len - at;
+    }
+    if (!(r->bbuf && at >= r->bat && at < r->bat + r->bbuf_len)) {
+        if (!r->bbuf) r->bbuf = tv_alloc(TV_FR_PIECE);
+        size_t want = r->blen - at < TV_FR_PIECE ? r->blen - at : TV_FR_PIECE;
+        ssize_t n;
+        do n = pread(r->bfd, r->bbuf, want, (off_t)(r->boff + (int64_t)at));
+        while (n < 0 && errno == EINTR);
+        r->bat = at;
+        r->bbuf_len = n > 0 ? (size_t)n : 0;
+        if (n <= 0) { *p = NULL; return 0; }
+    }
+    *p = r->bbuf + (at - r->bat);
+    return r->bat + r->bbuf_len - at;
+}
+
 /* Bytes of request still to write: the head, then the body (unless merged into the head). */
-static size_t tv_fr_out_len(const tv_fr *r) { return r->head.len + (r->merged ? 0 : (size_t)r->body.p->len); }
+static size_t tv_fr_out_len(const tv_fr *r) { return r->head.len + (r->merged ? 0 : tv_fr_body_len(r)); }
 
 static bool tv_fc_write(tv_fc *c) {
     tv_fr *r = c->r;
-    size_t hn = r->head.len, bn = r->merged ? 0 : (size_t)r->body.p->len;
+    size_t hn = r->head.len, bn = r->merged ? 0 : tv_fr_body_len(r);
     if (c->tls) {
         while (r->sent < hn + bn) {
-            const char *p = r->sent < hn ? r->head.data + r->sent : r->body.p->data + (r->sent - hn);
-            size_t n = r->sent < hn ? hn - r->sent : bn - (r->sent - hn);
+            const char *p = r->head.data + r->sent;
+            size_t n = r->sent < hn ? hn - r->sent : tv_fr_body_at(r, r->sent - hn, &p);
+            if (n == 0) return false;
             long w = tv_tls_impl->write(c->tls, p, n);
             if (w > 0) { r->sent += (size_t)w; continue; }
             if (w == -1) { tv_fc_interest(c, true, false); return true; }
@@ -12536,7 +12590,12 @@ static bool tv_fc_write(tv_fc *c) {
         int n = 0;
         if (r->sent < hn) iov[n++] = (struct iovec){ r->head.data + r->sent, hn - r->sent };
         size_t bo = r->sent > hn ? r->sent - hn : 0;
-        if (bn > bo) iov[n++] = (struct iovec){ r->body.p->data + bo, bn - bo };
+        if (bn > bo) {
+            const char *bp;
+            size_t bl = tv_fr_body_at(r, bo, &bp);
+            if (bl == 0) return false;
+            iov[n++] = (struct iovec){ (void *)bp, bl };
+        }
         struct msghdr mh;
         memset(&mh, 0, sizeof mh);
         mh.msg_iov = iov;
@@ -12915,7 +12974,7 @@ static void tv_fr_send(tv_fr *r, tv_fc *c) {
     r->c = c;
     c->r = r;
     r->sent = 0;
-    if (c->tls && !r->merged && r->body.p->len && r->body.p->len <= 8192) {
+    if (c->tls && !r->merged && r->bfd < 0 && r->body.p->len && r->body.p->len <= 8192) {
         /* one TLS record (and one write) for a small request */
         tv_sb_push(&r->head, r->body.p->data, (size_t)r->body.p->len);
         r->merged = true;
@@ -13325,6 +13384,7 @@ static void tv_fr_complete(tv_fr *r) {
             r->method = tv_str_from("GET", 3);
             tv_str_release(r->body);
             r->body = TV_EMPTY_STR;
+            tv_fr_drop_file(r);
             static const char *const body_headers[] = {"content-type", "content-length", "content-encoding", "content-language", "content-location", "transfer-encoding"};
             for (size_t i = 0; i < sizeof body_headers / sizeof *body_headers; i++) {
                 tv_str name = tv_str_from(body_headers[i], strlen(body_headers[i]));
@@ -13962,6 +14022,18 @@ static tv_fr *tv_fr_get(tv_int id) {
     return r && r->id == id ? r : NULL;
 }
 
+/* The next request's body from a file (tv_native_fetchBodyFile): taken by tv_native_fetchStart. */
+static int tv_fr_next_fd = -1;
+static int64_t tv_fr_next_off;
+static size_t tv_fr_next_len;
+
+void tv_native_fetchBodyFile(int fd, int64_t offset, size_t length) {
+    if (tv_fr_next_fd >= 0) close(tv_fr_next_fd);
+    tv_fr_next_fd = fd;
+    tv_fr_next_off = offset;
+    tv_fr_next_len = length;
+}
+
 tv_int tv_native_fetchStart(tv_str method, tv_str url, tv_str headers, tv_str body, tv_int redirect, tv_int flags, tv_str ca, tv_str unix_path, tv_str proxy) {
     tv_io_after_batch = tv_fc_reap;
     tv_io_after_fork = tv_fetch_after_fork;
@@ -13991,6 +14063,10 @@ tv_int tv_native_fetchStart(tv_str method, tv_str url, tv_str headers, tv_str bo
     r->method = method;
     r->headers = headers;
     r->body = body;
+    r->bfd = tv_fr_next_fd;
+    r->boff = tv_fr_next_off;
+    r->blen = tv_fr_next_len;
+    tv_fr_next_fd = -1;
     r->redirect_mode = (int)redirect;
     r->decompress = (flags & TV_FETCH_DECOMPRESS) != 0;
     r->insecure = (flags & TV_FETCH_INSECURE) != 0;
@@ -14211,6 +14287,7 @@ void tv_native_fetchFree(tv_int id) {
     if (r->done) tv_promise_release(r->done);
     if (r->body_p) tv_promise_release(r->body_p);
     if (r->read_p) tv_promise_release(r->read_p);
+    tv_fr_drop_file(r);
     tv_str_release(r->method);
     tv_str_release(r->headers);
     tv_str_release(r->body);

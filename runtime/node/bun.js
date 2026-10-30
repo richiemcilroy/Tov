@@ -381,6 +381,9 @@ function BunFile() {
     }
 
     get [Symbol.toStringTag]() { return 'Blob'; }
+
+    // (for fetch: a body sent from the file as it goes, not read into memory first)
+    get [Symbol.for('tov.filePart')]() { return { path: this.#path, start: this.#start, end: this.#end === Infinity ? -1 : this.#end }; }
   };
   // (Node.js's own Blob code reads a blob through its handle: a file's, made when asked)
   Object.defineProperty(BunFileClass.prototype, kHandle, {

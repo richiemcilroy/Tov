@@ -4030,6 +4030,30 @@ NATIVE(n_fetch_abort) {
     return undef(ctx);
 }
 
+/* bodyFile(path, start, end): the next start's body is that part of the file (end -1: to its end),
+ * sent from the file as it goes rather than read into memory first (Bun.file); its length */
+NATIVE(n_fetch_body_file) {
+    UNUSED;
+    PATH_ARG(path, 0);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) != 0) {
+        int err = errno;
+        if (fd >= 0) close(fd);
+        JSValueRef r = tv_node_throw(ctx, exc, err, "open", path, NULL);
+        free(path);
+        return r;
+    }
+    free(path);
+    double start = arg_num(ctx, n, a, 1, 0), end = arg_num(ctx, n, a, 2, -1);
+    int64_t size = (int64_t)st.st_size;
+    int64_t from = start < 0 ? 0 : start > (double)size ? size : (int64_t)start;
+    int64_t to = end < 0 || end > (double)size ? size : (int64_t)end;
+    if (to < from) to = from;
+    tv_native_fetchBodyFile(fd, from, (size_t)(to - from));
+    return num(ctx, (double)(to - from));
+}
+
 /* tls: whether the program links Tov's TLS client (https works) */
 NATIVE(n_fetch_tls) {
     UNUSED;
@@ -4058,6 +4082,7 @@ static void tv_node_fetch_install(JSContextRef ctx, JSObjectRef native) {
     tv_fetch_offload = !(off && strcmp(off, "0") == 0);
     JSObjectRef f = JSObjectMake(ctx, NULL, NULL);
     tv_js_def(ctx, f, "start", n_fetch_start);
+    tv_js_def(ctx, f, "bodyFile", n_fetch_body_file);
     tv_js_def(ctx, f, "wait", n_fetch_wait);
     tv_js_def(ctx, f, "bodyWait", n_fetch_body_wait);
     tv_js_def(ctx, f, "read", n_fetch_read);
