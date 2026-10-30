@@ -348,19 +348,50 @@ function BunFile() {
     async bytes() { const b = await this.#read(); return new Uint8Array(b.buffer, b.byteOffset, b.byteLength); }
     async arrayBuffer() { const b = await this.#read(); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength); }
 
+    // (read 512 KB at a time on the runtime's I/O threads, a chunk ahead of the reader, as Bun
+    // reads a file: Cap's media server joins a recording's segments through these, a write and a
+    // flush per chunk, and 64 KB chunks made that 7x the round trips)
     stream() {
-      const made = blobs().createBlobFromFilePath(this.#path, { type: this.#type });
-      if (!(made instanceof Blob())) {
-        const path = this.#path;
-        return new ReadableStream({
-          start(c) {
-            const e = new Error(`ENOENT: no such file or directory, open '${path}'`);
-            Object.assign(e, { code: 'ENOENT', errno: -2, syscall: 'open', path });
-            c.error(e);
-          },
-        });
-      }
-      return (this.#start === 0 && this.#end === Infinity ? made : made.slice(this.#start, this.#end)).stream();
+      const fs = fsModule();
+      const path = this.#path;
+      let pos = this.#start;
+      const end = this.#end;
+      let fd = null;
+      const close = () => {
+        if (fd !== null && fd >= 0) fs.close(fd, () => {});
+        fd = -1;
+      };
+      return new ReadableStream({
+        start: () => new Promise((ok, no) => fs.open(path, 'r', (e, f) => {
+          if (e) return no(e);
+          fd = f;
+          ok();
+        })),
+        pull: (c) => new Promise((ok, no) => {
+          const want = Math.min(FILE_CHUNK, end - pos);
+          if (!(want > 0)) {
+            close();
+            c.close();
+            return ok();
+          }
+          const buf = Buffer.allocUnsafe(want);
+          fs.read(fd, buf, 0, want, pos, (e, n) => {
+            if (e) {
+              close();
+              return no(e);
+            }
+            if (n === 0) {
+              close();
+              c.close();
+              return ok();
+            }
+            pos += n;
+            c.enqueue(new Uint8Array(buf.buffer, buf.byteOffset, n));
+            ok();
+          });
+        }),
+        cancel: close,
+      });
     }
 
     async exists() {
@@ -375,10 +406,7 @@ function BunFile() {
     async delete() { await fsModule().promises.unlink(this.#path); }
     unlink() { return this.delete(); }
 
-    writer() {
-      const ws = fsModule().createWriteStream(this.#path);
-      return fileSink(ws);
-    }
+    writer() { return fileWriter(this.#path); }
 
     get [Symbol.toStringTag]() { return 'Blob'; }
 
@@ -471,6 +499,73 @@ function fileSink(writable) {
         writable.once('close', () => resolve(n));
         writable.end();
       });
+    },
+    start() {},
+    ref() {},
+    unref() {},
+  };
+}
+
+// Bun.file(path).writer(): each chunk written at its place in the file on the runtime's I/O threads
+// as it's handed over, no stream between (Cap's media server saves 168 segments at once through
+// these, a write and a flush per chunk); flush() and end() settle once what was written is in,
+// end() once the file's closed
+const FILE_CHUNK = 512 * 1024;
+
+function fileWriter(path) {
+  const fs = fsModule();
+  let fd = fs.openSync(path, 'w');
+  let at = 0, pending = 0, inflight = 0, failed = null;
+  let waiters = [];
+  const settle = () => {
+    if (inflight !== 0) return;
+    const w = waiters;
+    waiters = [];
+    for (const [ok, no] of w) (failed ? no(failed) : ok());
+  };
+  const idle = () => new Promise((ok, no) => {
+    waiters.push([ok, no]);
+    settle();
+  });
+  return {
+    write(chunk) {
+      if (failed) throw failed;
+      if (fd < 0) throw new Error('This FileSink has ended');
+      const b = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : ArrayBuffer.isView(chunk) ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength) : Buffer.from(chunk);
+      const pos = at;
+      at += b.byteLength;
+      pending += b.byteLength;
+      if (b.byteLength === 0) return 0;
+      inflight++;
+      const put = (off) => fs.write(fd, b, off, b.byteLength - off, pos + off, (e, n) => {
+        if (!e && off + n < b.byteLength) return put(off + n);
+        if (e) failed ??= e;
+        inflight--;
+        settle();
+      });
+      put(0);
+      return b.byteLength;
+    },
+    flush() {
+      if (failed) return Promise.reject(failed);
+      const n = pending;
+      pending = 0;
+      return inflight === 0 ? n : idle().then(() => n);
+    },
+    end(error) {
+      const n = pending;
+      pending = 0;
+      if (fd < 0) return n;
+      const done = idle().finally(() => {
+        const f = fd;
+        fd = -1;
+        return new Promise((ok, no) => fs.close(f, (e) => (e ? no(e) : ok())));
+      });
+      if (error) {
+        done.catch(() => {});
+        return 0;
+      }
+      return done.then(() => n);
     },
     start() {},
     ref() {},

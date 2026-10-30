@@ -1,2 +1,5 @@
 every file whole at end: true
 last bytes: tail
+streamed back: true true
+streamed slice: true true
+missing: ENOENT
