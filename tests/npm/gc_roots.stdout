@@ -1,0 +1,2 @@
+readdir 4000 entries, 20 rounds, 0 wrong
+array 4000 strings, 20 rounds, 0 wrong

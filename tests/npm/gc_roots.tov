@@ -1,0 +1,12 @@
+import { run, check } from "gc-roots"
+
+function main() {
+  // values a native builds into a list one by one stay alive while it does
+  try run()
+  // and so do a long Tov array's, made into a JavaScript one
+  const names: string[] = []
+  for (let i = 0; i < 4000; i++) names.push("name-" + String(i))
+  let wrong = 0
+  for (let round = 0; round < 20; round++) wrong += try check(names) as int
+  console.log("array 4000 strings, 20 rounds,", wrong, "wrong")
+}
