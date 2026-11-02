@@ -1906,6 +1906,7 @@ uint32_t tv_js_length(JSValueRef v) {
 }
 
 JSValueRef tv_js_array(size_t n, const JSValueRef *items) { return JSObjectMakeArray(tv_js(), n, items, NULL); }
+void tv_js_set_at(JSValueRef arr, uint32_t i, JSValueRef v) { JSObjectSetPropertyAtIndex(tv_js(), (JSObjectRef)arr, i, v, NULL); }
 JSValueRef tv_js_object(void) { return JSObjectMake(tv_js(), NULL, NULL); }
 
 JSValueRef tv_js_lit(JSValueRef *slot, const char *s, size_t n) {

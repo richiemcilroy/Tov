@@ -278,14 +278,12 @@ NATIVE(n_info) {
     UNUSED;
     JSObjectRef o = JSObjectMake(ctx, NULL, NULL);
     /* Node.js: [node, script, args...]; a Tov program is both */
-    size_t count = (size_t)tv_argc + 1;
-    JSValueRef *items = malloc(sizeof(JSValueRef) * count);
     char exe[4096];
     tv_node_exec_path(exe, sizeof exe);
-    items[0] = str(ctx, exe);
-    for (int i = 0; i < tv_argc; i++) items[i + 1] = str(ctx, i == 0 ? exe : tv_argv[i]);
-    set(ctx, o, "argv", array(ctx, count, items));
-    free(items);
+    JSObjectRef argv = array(ctx, 0, NULL);
+    tv_js_set_at(argv, 0, str(ctx, exe));
+    for (int i = 0; i < tv_argc; i++) tv_js_set_at(argv, (unsigned)i + 1, str(ctx, i == 0 ? exe : tv_argv[i]));
+    set(ctx, o, "argv", argv);
     set(ctx, o, "execArgv", array(ctx, 0, NULL));
     set(ctx, o, "execPath", str(ctx, exe));
     set(ctx, o, "pid", num(ctx, getpid()));
@@ -845,20 +843,19 @@ NATIVE(n_os_cpus) {
     if (host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &count, &info, &info_count) != KERN_SUCCESS) return array(ctx, 0, NULL);
     long tick = sysconf(_SC_CLK_TCK);
     double mult = tick > 0 ? 1000.0 / (double)tick : 10;
-    JSValueRef *items = malloc(sizeof(JSValueRef) * count * 7);
+    JSObjectRef out = array(ctx, 0, NULL);
+    unsigned k = 0;
     for (natural_t i = 0; i < count; i++) {
         processor_cpu_load_info_t l = (processor_cpu_load_info_t)info + i;
-        items[i * 7 + 0] = str(ctx, model);
-        items[i * 7 + 1] = num(ctx, (double)(freq / 1000000));
-        items[i * 7 + 2] = num(ctx, l->cpu_ticks[CPU_STATE_USER] * mult);
-        items[i * 7 + 3] = num(ctx, l->cpu_ticks[CPU_STATE_NICE] * mult);
-        items[i * 7 + 4] = num(ctx, l->cpu_ticks[CPU_STATE_SYSTEM] * mult);
-        items[i * 7 + 5] = num(ctx, l->cpu_ticks[CPU_STATE_IDLE] * mult);
-        items[i * 7 + 6] = num(ctx, 0);
+        tv_js_set_at(out, k++, str(ctx, model));
+        tv_js_set_at(out, k++, num(ctx, (double)(freq / 1000000)));
+        tv_js_set_at(out, k++, num(ctx, l->cpu_ticks[CPU_STATE_USER] * mult));
+        tv_js_set_at(out, k++, num(ctx, l->cpu_ticks[CPU_STATE_NICE] * mult));
+        tv_js_set_at(out, k++, num(ctx, l->cpu_ticks[CPU_STATE_SYSTEM] * mult));
+        tv_js_set_at(out, k++, num(ctx, l->cpu_ticks[CPU_STATE_IDLE] * mult));
+        tv_js_set_at(out, k++, num(ctx, 0));
     }
     vm_deallocate(mach_task_self(), (vm_address_t)info, info_count * sizeof(int));
-    JSObjectRef out = array(ctx, count * 7, items);
-    free(items);
     return out;
 #else
     /* (the model and speed from /proc/cpuinfo, read once: the file is long, ~20 us a read) */
@@ -913,8 +910,8 @@ NATIVE(n_os_interfaces) {
     UNUSED;
     struct ifaddrs *list;
     if (getifaddrs(&list) != 0) return tv_node_ctx_error(ctx, n, a, 0, errno, "uv_interface_addresses");
-    size_t cap = 64, k = 0;
-    JSValueRef *items = malloc(sizeof(JSValueRef) * cap * 7);
+    JSObjectRef out = array(ctx, 0, NULL);
+    unsigned k = 0;
     for (struct ifaddrs *i = list; i; i = i->ifa_next) {
         if (!i->ifa_addr || !(i->ifa_flags & IFF_UP)) continue;
         int fam = i->ifa_addr->sa_family;
@@ -947,21 +944,15 @@ NATIVE(n_os_interfaces) {
             }
 #endif
         }
-        if (k + 7 > cap * 7) {
-            cap *= 2;
-            items = realloc(items, sizeof(JSValueRef) * cap * 7);
-        }
-        items[k++] = str(ctx, i->ifa_name);
-        items[k++] = str(ctx, addr);
-        items[k++] = str(ctx, mask);
-        items[k++] = str(ctx, fam == AF_INET ? "IPv4" : "IPv6");
-        items[k++] = str(ctx, mac);
-        items[k++] = JSValueMakeBoolean(ctx, (i->ifa_flags & IFF_LOOPBACK) != 0);
-        items[k++] = num(ctx, scope);
+        tv_js_set_at(out, k++, str(ctx, i->ifa_name));
+        tv_js_set_at(out, k++, str(ctx, addr));
+        tv_js_set_at(out, k++, str(ctx, mask));
+        tv_js_set_at(out, k++, str(ctx, fam == AF_INET ? "IPv4" : "IPv6"));
+        tv_js_set_at(out, k++, str(ctx, mac));
+        tv_js_set_at(out, k++, JSValueMakeBoolean(ctx, (i->ifa_flags & IFF_LOOPBACK) != 0));
+        tv_js_set_at(out, k++, num(ctx, scope));
     }
     freeifaddrs(list);
-    JSObjectRef out = array(ctx, k, items);
-    free(items);
     return out;
 }
 
@@ -1227,31 +1218,20 @@ NATIVE(n_fs_readdir) {
     bool types = n > 1 && JSValueToBoolean(ctx, a[1]);
     DIR *d = opendir(path);
     if (!d) { int e = errno; JSValueRef r = tv_node_throw(ctx, exc, e, "scandir", path, NULL); free(path); return r; }
-    size_t cap = 64, k = 0;
-    JSValueRef *names = malloc(sizeof(JSValueRef) * cap), *kinds = malloc(sizeof(JSValueRef) * cap);
+    JSObjectRef list = array(ctx, 0, NULL), kinds = array(ctx, 0, NULL);
+    unsigned k = 0;
     struct dirent *e;
     while ((e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        if (k == cap) {
-            cap *= 2;
-            names = realloc(names, sizeof(JSValueRef) * cap);
-            kinds = realloc(kinds, sizeof(JSValueRef) * cap);
-        }
-        names[k] = str(ctx, e->d_name);
-        kinds[k] = num(ctx, tv_node_dirent_type(e->d_type));
+        tv_js_set_at(list, k, str(ctx, e->d_name));
+        tv_js_set_at(kinds, k, num(ctx, tv_node_dirent_type(e->d_type)));
         k++;
     }
     closedir(d);
     free(path);
-    JSObjectRef list = array(ctx, k, names);
-    JSValueRef out = list;
-    if (types) {
-        JSValueRef pair[2] = {list, array(ctx, k, kinds)};
-        out = array(ctx, 2, pair);
-    }
-    free(names);
-    free(kinds);
-    return out;
+    if (!types) return list;
+    JSValueRef pair[2] = {list, kinds};
+    return array(ctx, 2, pair);
 }
 
 /* mkdir(path, mode, recursive): with recursive, the first directory it made (else undefined) */

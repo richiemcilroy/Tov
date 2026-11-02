@@ -240,6 +240,10 @@ static inline bool tv_js_truthy(JSValueRef v) {
 bool tv_js_is_array(JSValueRef v);
 uint32_t tv_js_length(JSValueRef v);    /* v.length as an array index */
 JSValueRef tv_js_array(size_t n, const JSValueRef *items);
+/* arr[i] = v. A list made one value at a time (each may collect) goes straight into its array:
+ * the collector scans the stack, not malloc'd memory, so a cell kept only in a malloc'd buffer
+ * is freed under it. */
+void tv_js_set_at(JSValueRef arr, uint32_t i, JSValueRef v);
 JSValueRef tv_js_object(void);
 JSValueRef tv_js_lit(JSValueRef *slot, const char *s, size_t n);   /* a string literal, created once */
 /* A JavaScript function calling a Tov closure through `tramp` (generated per signature); the

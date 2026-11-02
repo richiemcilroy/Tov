@@ -863,15 +863,14 @@ NAPI_EXTERN napi_status napi_create_bigint_uint64(napi_env env, uint64_t value, 
 
 NAPI_EXTERN napi_status napi_create_bigint_words(napi_env env, int sign_bit, size_t word_count, const uint64_t *words, napi_value *r) {
     ARG(env, r && (words || word_count == 0));
-    JSValueRef *ws = malloc((word_count ? word_count : 1) * sizeof *ws);
-    if (!ws) abort();
+    /* (each word straight into the array: see tv_js_set_at) */
+    JSValueRef ws = tv_js_array(0, NULL);
     for (size_t i = 0; i < word_count; i++) {
         char b[32];
         snprintf(b, sizeof b, "%llu", (unsigned long long)words[i]);
-        ws[i] = tv_js_str(b, strlen(b));
+        tv_js_set_at(ws, (uint32_t)i, tv_js_str(b, strlen(b)));
     }
-    JSValueRef args[2] = {JSValueMakeBoolean(env->ctx, sign_bit != 0), JSObjectMakeArray(env->ctx, word_count, ws, NULL)};
-    free(ws);
+    JSValueRef args[2] = {JSValueMakeBoolean(env->ctx, sign_bit != 0), ws};
     JSValueRef exc = NULL;
     JSValueRef v = tv_napi_call_helper(env, "bigintWords", 2, args, &exc);
     CHECK_EXC(env, exc);

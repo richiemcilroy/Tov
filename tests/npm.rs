@@ -80,6 +80,11 @@ fn main() {
             } else {
                 Command::new(&built.binary)
             };
+            // `gc_roots`: a collection every 50 slow-path allocations, so a value a native holds
+            // where the collector can't see it is freed at once instead of once in a day
+            if name == "gc_roots" {
+                cmd.env("JSC_slowPathAllocsBetweenGCs", "50");
+            }
             if let Some(dir) = &cache {
                 if run == 0 {
                     let _ = std::fs::remove_dir_all(dir);

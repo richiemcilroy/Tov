@@ -211,9 +211,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let ect = self.ctype(e);
                 let conv = self.js_to_code(e, "xs[i]");
                 let _ = writeln!(b, "    tv_int n = tv_arr_len(v); const {ect} *xs = (const {ect} *)tv_arr_data(v);");
-                let _ = writeln!(b, "    JSValueRef small[16]; JSValueRef *items = n <= 16 ? small : tv_alloc((size_t)n * sizeof(JSValueRef));");
-                let _ = writeln!(b, "    for (tv_int i = 0; i < n; i++) items[i] = {conv};");
-                let _ = writeln!(b, "    JSValueRef r = tv_js_array((size_t)n, items);\n    if (items != small) tv_free(items);\n    return r;");
+                // (a short one through a buffer on the stack, which the collector scans; a long one
+                // straight into its array: each item made may collect, see tv_js_set_at)
+                let _ = writeln!(b, "    if (n <= 16) {{\n        JSValueRef items[16];\n        for (tv_int i = 0; i < n; i++) items[i] = {conv};\n        return tv_js_array((size_t)n, items);\n    }}");
+                let _ = writeln!(b, "    JSValueRef r = tv_js_array(0, NULL);\n    for (tv_int i = 0; i < n; i++) tv_js_set_at(r, (uint32_t)i, {conv});\n    return r;");
             }
             Ty::Record(fs) => {
                 let _ = fs;
